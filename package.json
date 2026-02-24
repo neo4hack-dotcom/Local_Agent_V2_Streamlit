@@ -1,0 +1,14 @@
+{
+  "name": "local-agent-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "setup": "bash ./scripts/setup.sh",
+    "start:all": "bash ./scripts/start-all.sh",
+    "dev": "npm run start:all",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "dev:backend": "bash ./scripts/dev-backend.sh",
+    "dev:webhook-bridge": "bash ./scripts/dev-webhook-bridge.sh"
+  }
+}

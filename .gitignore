@@ -1,0 +1,30 @@
+# Operating system
+.DS_Store
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Node.js
+node_modules/
+.next/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/.venv/
+*.egg-info/
+backend/data/settings.json
+backend/data/agents.json
+
+# Editors / IDE
+.idea/
+.vscode/
+*.swp
