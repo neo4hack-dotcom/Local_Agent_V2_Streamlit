@@ -23,6 +23,7 @@ backend/.venv/
 *.egg-info/
 backend/data/settings.json
 backend/data/agents.json
+backend/data/exports/
 
 # Editors / IDE
 .idea/

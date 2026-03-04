@@ -170,7 +170,9 @@ class MultiAgentManager:
             )
 
             if decision.status == "done":
-                answer = decision.final_answer or self._fallback_answer()
+                answer = self._normalize_final_answer(decision.final_answer)
+                if not answer:
+                    answer = self._fallback_answer()
                 yield self._final_event(
                     status="done",
                     answer=answer,
@@ -181,8 +183,13 @@ class MultiAgentManager:
                 return
 
             if decision.status == "blocked":
-                answer = decision.final_answer or "I could not complete the full request."
-                missing = decision.missing_information or self._infer_missing_information()
+                answer = self._normalize_final_answer(decision.final_answer)
+                if not answer:
+                    answer = "I could not complete the full request."
+                missing = (
+                    self._normalize_optional_text(decision.missing_information)
+                    or self._infer_missing_information()
+                )
                 yield self._final_event(
                     status="blocked",
                     answer=answer,
@@ -466,8 +473,10 @@ class MultiAgentManager:
             "the available orchestration paths."
         )
 
-        if last_decision and last_decision.final_answer:
-            exhausted_answer = last_decision.final_answer
+        if last_decision:
+            candidate = self._normalize_final_answer(last_decision.final_answer)
+            if candidate:
+                exhausted_answer = candidate
 
         yield self._final_event(
             status="exhausted",
@@ -688,6 +697,13 @@ class MultiAgentManager:
 
         if decision.status != "continue":
             decision.calls = []
+        decision.rationale = self._truncate_text(decision.rationale, 500)
+        decision.final_answer = (
+            self._normalize_final_answer(decision.final_answer) or None
+        )
+        decision.missing_information = (
+            self._normalize_optional_text(decision.missing_information) or None
+        )
 
         return decision
 
@@ -967,8 +983,9 @@ class MultiAgentManager:
             status = str(payload.get("status") or "").strip().lower()
             if status != "done":
                 return None
-            final_answer = str(payload.get("final_answer") or "").strip()
-            return final_answer or answer
+            final_answer = self._normalize_final_answer(payload.get("final_answer"))
+            normalized_source_answer = self._normalize_final_answer(answer)
+            return final_answer or normalized_source_answer
         except Exception:  # noqa: BLE001
             return None
 
@@ -1389,14 +1406,51 @@ class MultiAgentManager:
         except json.JSONDecodeError:
             return None
 
+    @staticmethod
+    def _normalize_optional_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    def _normalize_final_answer(self, value: Any) -> str:
+        text = self._normalize_optional_text(value)
+        if not text:
+            return ""
+
+        collapsed = re.sub(r"\s+", " ", text).strip().lower().strip(".")
+        placeholder_values = {
+            "none",
+            "null",
+            "n/a",
+            "na",
+            "empty",
+            "(empty)",
+            "undefined",
+        }
+        if collapsed in placeholder_values:
+            return ""
+        return text
+
+    def _default_answer_for_status(
+        self, status: Literal["done", "blocked", "exhausted"]
+    ) -> str:
+        if status == "done":
+            return self._fallback_answer()
+        if status == "blocked":
+            return "The manager stopped before producing an explicit final answer."
+        return "The manager exhausted its budget before producing an explicit final answer."
+
     def _fallback_answer(self) -> str:
         latest_success = self._latest_success_observation()
-        if latest_success and latest_success.get("answer"):
-            return str(latest_success["answer"])
+        if latest_success:
+            latest_answer = self._normalize_final_answer(latest_success.get("answer"))
+            if latest_answer:
+                return latest_answer
 
         for item in reversed(self.history):
-            if item.get("status") == "success" and item.get("answer"):
-                return str(item["answer"])
+            if item.get("status") != "success":
+                continue
+            answer = self._normalize_final_answer(item.get("answer"))
+            if answer:
+                return answer
         return "Done. The manager completed execution, but no explicit final answer was produced."
 
     def _build_manager_summary(
@@ -1829,17 +1883,21 @@ class MultiAgentManager:
         steps: int,
         agent_calls: int,
     ) -> dict[str, Any]:
+        normalized_answer = self._normalize_final_answer(answer)
+        if not normalized_answer:
+            normalized_answer = self._default_answer_for_status(status)
+        normalized_missing = self._normalize_optional_text(missing_information) or None
         manager_summary = self._build_manager_summary(
             status=status,
-            answer=answer,
-            missing_information=missing_information,
+            answer=normalized_answer,
+            missing_information=normalized_missing,
             steps=steps,
             agent_calls=agent_calls,
         )
         judge = self._run_sanity_judge(
             status=status,
-            answer=answer,
-            missing_information=missing_information,
+            answer=normalized_answer,
+            missing_information=normalized_missing,
             steps=steps,
             agent_calls=agent_calls,
         )
@@ -1847,7 +1905,7 @@ class MultiAgentManager:
             "type": "manager_final",
             "ts": datetime.now(timezone.utc).isoformat(),
             "status": status,
-            "answer": answer,
+            "answer": normalized_answer,
             "manager_summary": manager_summary,
             "judge_verdict": judge.verdict,
             "judge_confidence": judge.confidence,
@@ -1855,7 +1913,7 @@ class MultiAgentManager:
             "judge_checks_passed": judge.checks_passed,
             "judge_checks_failed": judge.checks_failed,
             "judge_recommendations": judge.recommendations,
-            "missing_information": missing_information,
+            "missing_information": normalized_missing,
             "steps": steps,
             "agent_calls": agent_calls,
         }

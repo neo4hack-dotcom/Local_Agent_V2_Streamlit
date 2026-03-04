@@ -94,6 +94,27 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
+function resolveManagerFinalAnswer(final: ManagerFinalEvent | null): string {
+  if (!final) {
+    return "";
+  }
+  const answer = String(final.answer ?? "").trim();
+  if (answer) {
+    return answer;
+  }
+  const missing = String(final.missing_information ?? "").trim();
+  if (missing) {
+    return `No explicit final answer was generated. Missing information: ${missing}`;
+  }
+  if (final.status === "blocked") {
+    return "The manager stopped before producing an explicit final answer.";
+  }
+  if (final.status === "exhausted") {
+    return "The manager exhausted its budget before producing an explicit final answer.";
+  }
+  return "The manager completed execution but no explicit final answer was generated.";
+}
+
 const MAX_PLAYGROUND_MEMORY_TURNS = 12;
 
 export function PlaygroundTab({
@@ -114,6 +135,8 @@ export function PlaygroundTab({
   const [isRunning, setIsRunning] = useState(false);
   const [isWorkflowOpen, setIsWorkflowOpen] = useState(false);
   const [useMemory, setUseMemory] = useState(true);
+  const [exportIntermediateResultsToExcel, setExportIntermediateResultsToExcel] =
+    useState(false);
   const [conversationHistory, setConversationHistory] = useState<ConversationTurn[]>([]);
 
   const activeAgent = useMemo(
@@ -210,10 +233,17 @@ export function PlaygroundTab({
 
       if (event.type === "manager_final") {
         const status = String(event.status ?? "done");
+        const finalAnswer = String(event.answer ?? "").trim();
+        const missing = String(event.missing_information ?? "").trim();
+        const subtitle =
+          finalAnswer ||
+          (missing
+            ? `No explicit final answer. Missing information: ${missing}`
+            : "No explicit final answer.");
         return {
           ...base,
           title: `Final status: ${status}`,
-          subtitle: String(event.answer ?? "").slice(0, 220),
+          subtitle: subtitle.slice(0, 220),
           detail: String(event.missing_information ?? ""),
           tone: status === "done" ? "success" : "warning"
         };
@@ -243,6 +273,10 @@ export function PlaygroundTab({
   const managerSummary = useMemo(
     () => parseManagerSummary(managerSummaryText),
     [managerSummaryText]
+  );
+  const managerFinalAnswer = useMemo(
+    () => resolveManagerFinalAnswer(managerFinal),
+    [managerFinal]
   );
 
   const reasoningTrail = useMemo(() => {
@@ -327,6 +361,12 @@ export function PlaygroundTab({
   const judgeRecommendations = Array.isArray(managerFinal?.judge_recommendations)
     ? managerFinal.judge_recommendations
     : [];
+  const intermediateResultsExcelPath = String(
+    managerFinal?.intermediate_results_excel_path ?? ""
+  ).trim();
+  const intermediateResultsExcelError = String(
+    managerFinal?.intermediate_results_excel_error ?? ""
+  ).trim();
   const webhookReplacementEnabled =
     webhookConfig.enabled &&
     webhookConfig.replace_playground &&
@@ -401,19 +441,21 @@ export function PlaygroundTab({
           question,
           max_steps: managerConfig.max_steps,
           max_agent_calls: managerConfig.max_agent_calls,
-          conversation_history: memoryForRequest
+          conversation_history: memoryForRequest,
+          export_intermediate_results_to_excel: exportIntermediateResultsToExcel
         },
         (event) => {
           setManagerEvents((previous) => [...previous, event]);
         }
       );
 
+      const finalAnswerText = resolveManagerFinalAnswer(final);
       setManagerFinal(final);
       setConversationHistory((previous) => {
         const next: ConversationTurn[] = [
           ...previous,
           { role: "user", content: question.trim() },
-          { role: "assistant", content: String(final.answer ?? "").trim() || "(empty answer)" }
+          { role: "assistant", content: finalAnswerText }
         ];
         return next.slice(-MAX_PLAYGROUND_MEMORY_TURNS);
       });
@@ -512,6 +554,18 @@ export function PlaygroundTab({
               />
               Use conversation memory
             </label>
+            {mode === "manager" && (
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={exportIntermediateResultsToExcel}
+                  onChange={(event) =>
+                    setExportIntermediateResultsToExcel(event.target.checked)
+                  }
+                />
+                Export intermediate results to Excel
+              </label>
+            )}
             <span className="hint">
               Stored turns: <strong>{conversationHistory.length}</strong> / {MAX_PLAYGROUND_MEMORY_TURNS}
             </span>
@@ -572,7 +626,17 @@ export function PlaygroundTab({
 
             <article className="manager-answer-hero">
               <h3>Manager final answer</h3>
-              <p>{managerFinal.answer || "(empty)"}</p>
+              <p>{managerFinalAnswer || "(empty)"}</p>
+              {intermediateResultsExcelPath && (
+                <p className="hint">
+                  Intermediate results exported to: <code>{intermediateResultsExcelPath}</code>
+                </p>
+              )}
+              {intermediateResultsExcelError && (
+                <p className="hint">
+                  Intermediate results export error: {intermediateResultsExcelError}
+                </p>
+              )}
             </article>
 
             <div className="manager-metrics-row">
