@@ -191,6 +191,8 @@ export interface ManagerFinalEvent extends ManagerEvent {
   judge_checks_failed?: string[] | null;
   judge_recommendations?: string[] | null;
   missing_information?: string | null;
+  intermediate_results_excel_path?: string | null;
+  intermediate_results_excel_error?: string | null;
   steps: number;
   agent_calls: number;
 }

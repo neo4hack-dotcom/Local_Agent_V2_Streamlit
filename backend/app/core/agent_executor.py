@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
@@ -72,6 +72,15 @@ class AgentExecutor:
             return self._run_rag_context(agent, question)
 
         raise ValueError(f"Unsupported agent type: {agent.agent_type}")
+
+    @staticmethod
+    def _json_default(value: Any) -> str:
+        if isinstance(value, (datetime, date, time)):
+            return value.isoformat()
+        return str(value)
+
+    def _json_dumps(self, value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, default=self._json_default)
 
     def _run_sql_analyst(
         self,
@@ -162,7 +171,7 @@ class AgentExecutor:
 
         connector = connector_for(database)
         rows = connector.run_query(rendered_sql, limit=agent.max_rows)
-        rows_payload = json.dumps(rows, ensure_ascii=False)
+        rows_payload = self._json_dumps(rows)
         prompt = agent.answer_prompt_template.format(
             question=question,
             sql=rendered_sql,
@@ -285,7 +294,7 @@ class AgentExecutor:
             raise ValueError("No executable SQL statement was produced for this request.")
 
         sql_text = ";\n".join(executed_sql)
-        rows_payload = json.dumps(execution_rows, ensure_ascii=False)
+        rows_payload = self._json_dumps(execution_rows)
         prompt = agent.answer_prompt_template.format(
             question=question,
             sql=sql_text,

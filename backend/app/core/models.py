@@ -263,6 +263,7 @@ class ManagerRunRequest(BaseModel):
     max_steps: int = Field(default=6, ge=1, le=30)
     max_agent_calls: int = Field(default=12, ge=1, le=100)
     conversation_history: list[ConversationTurn] = Field(default_factory=list)
+    export_intermediate_results_to_excel: bool = False
 
 
 class ManagerRunResponse(BaseModel):
@@ -276,6 +277,8 @@ class ManagerRunResponse(BaseModel):
     judge_checks_failed: list[str] = Field(default_factory=list)
     judge_recommendations: list[str] = Field(default_factory=list)
     missing_information: str | None = None
+    intermediate_results_excel_path: str | None = None
+    intermediate_results_excel_error: str | None = None
     steps: int
     agent_calls: int
     timeline: list[dict[str, Any]] = Field(default_factory=list)

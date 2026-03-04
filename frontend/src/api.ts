@@ -284,6 +284,7 @@ export async function runManagerStream(
     max_steps?: number;
     max_agent_calls?: number;
     conversation_history?: ConversationTurn[];
+    export_intermediate_results_to_excel?: boolean;
   },
   onEvent: (event: ManagerEvent) => void
 ): Promise<ManagerFinalEvent> {

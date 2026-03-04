@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import Literal
+from datetime import date, datetime, time, timezone
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +31,7 @@ from app.core.models import (
     AppSettings,
     agent_requires_database,
 )
+from app.core.settings import DATA_DIR
 from app.core.storage import JSONRepository
 from app.core.webhook_dispatcher import WebhookDispatcher
 
@@ -38,6 +39,8 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 MAX_AGENT_AUDIT_VERSIONS = 5
 MAX_CONVERSATION_MEMORY_TURNS = 12
 MAX_CONVERSATION_MEMORY_CHARS = 1200
+MAX_EXCEL_TEXT_CHARS = 32000
+MAX_EXCEL_PREVIEW_CHARS = 1200
 
 
 def _find_agent(catalog: AgentCatalog, agent_id: str) -> AgentConfig:
@@ -128,6 +131,212 @@ def _contextual_question(question: str, turns: list[ConversationTurn]) -> str:
         + base_question
         + "\n\nInstruction: Use memory only if relevant and prioritize the current request."
     )
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    return str(value)
+
+
+def _safe_json_text(value: Any, limit: int = MAX_EXCEL_TEXT_CHARS) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=_json_default)
+    except Exception:  # noqa: BLE001
+        text = str(value)
+    return _truncate_text(text, limit)
+
+
+def _excel_cell_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, datetime, date, time)):
+        return value
+    if isinstance(value, str):
+        return _truncate_text(value, MAX_EXCEL_TEXT_CHARS)
+    if isinstance(value, (dict, list, tuple, set)):
+        return _safe_json_text(value, limit=MAX_EXCEL_TEXT_CHARS)
+    return _truncate_text(str(value), MAX_EXCEL_TEXT_CHARS)
+
+
+def _call_event_key(event: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(event.get("step", "")),
+        str(event.get("call_index", "")),
+        str(event.get("agent_id", "")),
+    )
+
+
+def _export_manager_intermediate_results_to_excel(
+    *,
+    question: str,
+    timeline: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    try:
+        from openpyxl import Workbook
+    except ModuleNotFoundError:
+        return (
+            None,
+            "Excel export requires 'openpyxl'. Install backend dependencies and retry.",
+        )
+
+    try:
+        export_dir = DATA_DIR / "exports" / "manager_runs"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        file_path = export_dir / f"manager_intermediate_{timestamp}_{uuid4().hex[:8]}.xlsx"
+
+        workbook = Workbook()
+        summary_ws = workbook.active
+        summary_ws.title = "run_summary"
+
+        final_event = next(
+            (event for event in reversed(timeline) if event.get("type") == "manager_final"),
+            None,
+        )
+
+        summary_ws.append(["field", "value"])
+        summary_rows: list[tuple[str, Any]] = [
+            ("generated_at_utc", datetime.now(timezone.utc).isoformat()),
+            ("question", question),
+            ("total_events", len(timeline)),
+            ("final_status", final_event.get("status") if isinstance(final_event, dict) else ""),
+            ("final_answer", final_event.get("answer") if isinstance(final_event, dict) else ""),
+            (
+                "final_missing_information",
+                final_event.get("missing_information") if isinstance(final_event, dict) else "",
+            ),
+            ("final_steps", final_event.get("steps") if isinstance(final_event, dict) else ""),
+            (
+                "final_agent_calls",
+                final_event.get("agent_calls") if isinstance(final_event, dict) else "",
+            ),
+        ]
+        for key, value in summary_rows:
+            summary_ws.append([key, _excel_cell_value(value)])
+
+        events_ws = workbook.create_sheet("timeline_events")
+        events_ws.append(
+            [
+                "index",
+                "ts",
+                "type",
+                "step",
+                "call_index",
+                "agent_id",
+                "agent_name",
+                "agent_type",
+                "status",
+                "question",
+                "rationale",
+                "error",
+                "row_count",
+                "database_id",
+                "database_name",
+                "missing_information",
+                "answer_preview",
+                "sql_preview",
+                "details_json",
+                "rows_preview_json",
+            ]
+        )
+        for index, event in enumerate(timeline, start=1):
+            if not isinstance(event, dict):
+                continue
+            events_ws.append(
+                [
+                    index,
+                    _excel_cell_value(event.get("ts")),
+                    _excel_cell_value(event.get("type")),
+                    _excel_cell_value(event.get("step")),
+                    _excel_cell_value(event.get("call_index")),
+                    _excel_cell_value(event.get("agent_id")),
+                    _excel_cell_value(event.get("agent_name")),
+                    _excel_cell_value(event.get("agent_type")),
+                    _excel_cell_value(event.get("status")),
+                    _excel_cell_value(event.get("question")),
+                    _excel_cell_value(event.get("rationale")),
+                    _excel_cell_value(event.get("error")),
+                    _excel_cell_value(event.get("row_count")),
+                    _excel_cell_value(event.get("database_id")),
+                    _excel_cell_value(event.get("database_name")),
+                    _excel_cell_value(event.get("missing_information")),
+                    _truncate_text(str(event.get("answer", "")), MAX_EXCEL_PREVIEW_CHARS),
+                    _truncate_text(str(event.get("sql", "")), MAX_EXCEL_PREVIEW_CHARS),
+                    _safe_json_text(event.get("details", {}), limit=MAX_EXCEL_TEXT_CHARS),
+                    _safe_json_text(event.get("rows_preview", []), limit=MAX_EXCEL_TEXT_CHARS),
+                ]
+            )
+
+        calls_ws = workbook.create_sheet("agent_calls")
+        calls_ws.append(
+            [
+                "step",
+                "call_index",
+                "agent_id",
+                "agent_name",
+                "agent_type",
+                "question",
+                "status",
+                "row_count",
+                "error",
+                "answer_preview",
+                "sql_preview",
+                "database_id",
+                "database_name",
+                "details_json",
+            ]
+        )
+        started_calls: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for event in timeline:
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type", ""))
+            if event_type == "agent_call_started":
+                started_calls[_call_event_key(event)] = event
+                continue
+            if event_type not in {"agent_call_completed", "agent_call_failed"}:
+                continue
+            key = _call_event_key(event)
+            started = started_calls.pop(key, {})
+            calls_ws.append(
+                [
+                    _excel_cell_value(event.get("step")),
+                    _excel_cell_value(event.get("call_index")),
+                    _excel_cell_value(event.get("agent_id")),
+                    _excel_cell_value(event.get("agent_name")),
+                    _excel_cell_value(event.get("agent_type")),
+                    _excel_cell_value(
+                        started.get("question")
+                        if isinstance(started, dict)
+                        else event.get("question")
+                    ),
+                    "success" if event_type == "agent_call_completed" else "failed",
+                    _excel_cell_value(event.get("row_count")),
+                    _excel_cell_value(event.get("error")),
+                    _truncate_text(str(event.get("answer", "")), MAX_EXCEL_PREVIEW_CHARS),
+                    _truncate_text(str(event.get("sql", "")), MAX_EXCEL_PREVIEW_CHARS),
+                    _excel_cell_value(
+                        started.get("database_id")
+                        if isinstance(started, dict)
+                        else event.get("database_id")
+                    ),
+                    _excel_cell_value(
+                        started.get("database_name")
+                        if isinstance(started, dict)
+                        else event.get("database_name")
+                    ),
+                    _safe_json_text(event.get("details", {}), limit=MAX_EXCEL_TEXT_CHARS),
+                ]
+            )
+
+        raw_ws = workbook.create_sheet("raw_events")
+        raw_ws.append(["index", "event_json"])
+        for index, event in enumerate(timeline, start=1):
+            raw_ws.append([index, _safe_json_text(event, limit=MAX_EXCEL_TEXT_CHARS)])
+
+        workbook.save(file_path)
+        return str(file_path), None
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
 
 
 @router.get("", response_model=list[AgentConfig])
@@ -371,6 +580,24 @@ def run_with_manager(
 
     timeline = list(manager.run_stream(payload))
 
+    final_event = next(
+        (event for event in reversed(timeline) if event.get("type") == "manager_final"),
+        None,
+    )
+
+    if not final_event:
+        raise HTTPException(status_code=500, detail="Manager execution ended unexpectedly.")
+
+    if payload.export_intermediate_results_to_excel:
+        export_path, export_error = _export_manager_intermediate_results_to_excel(
+            question=payload.question,
+            timeline=timeline,
+        )
+        if export_path:
+            final_event["intermediate_results_excel_path"] = export_path
+        if export_error:
+            final_event["intermediate_results_excel_error"] = export_error
+
     if settings.webhook.enabled and settings.webhook.url.strip():
         dispatcher = WebhookDispatcher(settings.webhook)
         run_id = uuid4().hex
@@ -381,6 +608,7 @@ def run_with_manager(
             "max_steps": payload.max_steps,
             "max_agent_calls": payload.max_agent_calls,
             "memory_turns": len(memory_turns),
+            "export_intermediate_results_to_excel": payload.export_intermediate_results_to_excel,
         }
         for sequence, event in enumerate(timeline, start=1):
             dispatcher.send_manager_event(
@@ -390,14 +618,6 @@ def run_with_manager(
                 sequence=sequence,
                 timeline=timeline if event.get("type") == "manager_final" else None,
             )
-
-    final_event = next(
-        (event for event in reversed(timeline) if event.get("type") == "manager_final"),
-        None,
-    )
-
-    if not final_event:
-        raise HTTPException(status_code=500, detail="Manager execution ended unexpectedly.")
 
     return ManagerRunResponse(
         status=final_event["status"],
@@ -410,6 +630,8 @@ def run_with_manager(
         judge_checks_failed=final_event.get("judge_checks_failed", []),
         judge_recommendations=final_event.get("judge_recommendations", []),
         missing_information=final_event.get("missing_information"),
+        intermediate_results_excel_path=final_event.get("intermediate_results_excel_path"),
+        intermediate_results_excel_error=final_event.get("intermediate_results_excel_error"),
         steps=final_event["steps"],
         agent_calls=final_event["agent_calls"],
         timeline=timeline,
@@ -435,6 +657,7 @@ def run_with_manager_stream(
         "max_steps": payload.max_steps,
         "max_agent_calls": payload.max_agent_calls,
         "memory_turns": len(memory_turns),
+        "export_intermediate_results_to_excel": payload.export_intermediate_results_to_excel,
     }
 
     def iter_events():
@@ -452,6 +675,18 @@ def run_with_manager_stream(
             for event in manager.run_stream(payload):
                 sequence += 1
                 timeline_for_webhook.append(event)
+                if (
+                    payload.export_intermediate_results_to_excel
+                    and event.get("type") == "manager_final"
+                ):
+                    export_path, export_error = _export_manager_intermediate_results_to_excel(
+                        question=payload.question,
+                        timeline=timeline_for_webhook,
+                    )
+                    if export_path:
+                        event["intermediate_results_excel_path"] = export_path
+                    if export_error:
+                        event["intermediate_results_excel_error"] = export_error
                 if webhook_enabled:
                     webhook_dispatcher.send_manager_event(
                         run_id=webhook_run_id,
@@ -481,9 +716,18 @@ def run_with_manager_stream(
                 "judge_checks_failed": ["Unexpected backend error interrupted orchestration."],
                 "judge_recommendations": ["Inspect backend logs and rerun the request."],
                 "missing_information": str(exc),
+                "intermediate_results_excel_path": None,
+                "intermediate_results_excel_error": None,
                 "steps": 0,
                 "agent_calls": 0,
             }
+            if payload.export_intermediate_results_to_excel:
+                export_path, export_error = _export_manager_intermediate_results_to_excel(
+                    question=payload.question,
+                    timeline=[*timeline_for_webhook, fallback],
+                )
+                fallback["intermediate_results_excel_path"] = export_path
+                fallback["intermediate_results_excel_error"] = export_error
             sequence += 1
             timeline_for_webhook.append(fallback)
             if webhook_enabled:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, datetime, time
 from typing import Any
 from typing_extensions import TypedDict
 
@@ -12,6 +13,12 @@ from .llm_client import LLMClient
 from .models import AgentConfig, DatabaseProfile, LLMConfig
 
 _SQL_BLOCK = re.compile(r"```sql\s*(.*?)```", flags=re.IGNORECASE | re.DOTALL)
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    return str(value)
 
 
 class AgentState(TypedDict, total=False):
@@ -58,7 +65,9 @@ def _query_node(state: AgentState) -> AgentState:
 
 def _answer_node(state: AgentState) -> AgentState:
     llm = LLMClient(state["llm"])
-    rows_payload = json.dumps(state.get("rows", []), ensure_ascii=False)
+    rows_payload = json.dumps(
+        state.get("rows", []), ensure_ascii=False, default=_json_default
+    )
     prompt = state["agent"].answer_prompt_template.format(
         question=state["question"],
         sql=state["sql"],
