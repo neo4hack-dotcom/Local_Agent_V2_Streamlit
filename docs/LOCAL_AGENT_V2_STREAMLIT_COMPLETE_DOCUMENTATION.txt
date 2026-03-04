@@ -1,0 +1,2297 @@
+Local Agent Studio (LangGraph) - Complete Technical, Functional, and Process Documentation
+Version: 1.0
+Generated on: 2026-03-04
+Repository: /Users/mathieumasson/Documents/New project/Local_Agent_V2_Streamlit
+
+====================================================================
+DOCUMENT PURPOSE
+====================================================================
+This document provides a complete reference for the application, covering:
+1. Technical architecture and runtime internals.
+2. Functional behavior per module and per user workflow.
+3. Operational processes for setup, execution, and troubleshooting.
+4. Object model definitions and execution constraints.
+5. Full function inventory appendix for backend, frontend, and runner modules.
+
+Language: English (as requested).
+Format: Structured plain text.
+
+--------------------------------------------------------------------
+How to read this document
+--------------------------------------------------------------------
+- Sections 1-7 describe architecture and contracts.
+- Sections 8-12 describe runtime execution flows step-by-step.
+- Sections 13-16 describe frontend, process, and operations.
+- Section 17 lists constraints and guardrails.
+- Sections 18-20 explain extensibility and maintenance.
+- Appendices provide complete function/object inventories extracted from source.
+
+This document is intentionally long and detailed to support both engineering and
+operational usage. The content volume exceeds a typical 20-page equivalent when
+printed in standard A4/Letter technical layout.
+
+====================================================================
+1) SYSTEM OVERVIEW
+====================================================================
+Local Agent Studio is a fullstack local AI orchestration platform built around
+LangGraph and FastAPI, with a React frontend. It lets users:
+- Configure LLM providers (Ollama or generic HTTP endpoint).
+- Configure multiple databases (ClickHouse, Oracle, Elasticsearch).
+- Create and manage multiple specialized agents.
+- Execute either:
+  - Single-agent runs.
+  - Multi-agent manager orchestration with real-time event streaming.
+- Optionally forward orchestration events to an external webhook UI.
+- Optionally export manager intermediate results to Excel.
+- Define automation rules that trigger agent chains on file events.
+
+Core architectural principle:
+- Manager plans and coordinates.
+- Specialized agents execute bounded tasks.
+- Every important orchestration action emits explicit events.
+
+====================================================================
+2) REPOSITORY STRUCTURE
+====================================================================
+Top-level directories:
+- backend/: FastAPI API, orchestration logic, execution engine, connectors.
+- frontend/: React + TypeScript UI.
+- scripts/: setup and local runtime scripts.
+- vscode_simple_runner/: CLI/Streamlit wrappers reusing backend engine.
+- docs/: documentation artifacts.
+
+Important entry points:
+- Backend API app: backend/app/main.py
+- Open WebUI bridge app: backend/app/open_webui_bridge.py
+- Frontend app: frontend/src/App.tsx
+- LangGraph SQL runner: backend/app/core/langgraph_agent.py
+- Multi-agent manager: backend/app/core/multi_agent_manager.py
+- Agent execution dispatcher: backend/app/core/agent_executor.py
+
+====================================================================
+3) LAYERED TECHNICAL ARCHITECTURE
+====================================================================
+3.1 Frontend Layer (React)
+Responsibilities:
+- Capture user configuration and runtime commands.
+- Display live manager event timeline.
+- Present final manager answer, summary, and sanity-judge outputs.
+- Provide import/export UX for database/agent configs.
+- Manage automation rule editing and run logs.
+
+3.2 API Layer (FastAPI routers)
+Responsibilities:
+- Expose typed contracts for configuration, databases, agents, manager, automations.
+- Normalize/validate inputs via Pydantic models.
+- Coordinate persistence through JSON repositories.
+- Stream NDJSON manager events.
+
+3.3 Core Orchestration Layer
+Responsibilities:
+- LLM provider abstraction and generation.
+- Agent execution dispatch per agent type.
+- Multi-agent decision loop (plan, execute, evaluate, finalize).
+- LangGraph state machines for SQL analyst and web navigator flows.
+
+3.4 Data Access Layer
+Responsibilities:
+- Connector abstraction for ClickHouse, Oracle, Elasticsearch.
+- Database routing policy per agent type.
+- Read-only constraints for SQL analyst mode.
+
+3.5 Persistence Layer
+Responsibilities:
+- Local JSON persistence for settings and agents.
+- Atomic write semantics and thread-safe repository access.
+- Runtime in-memory logs for automation runs.
+
+====================================================================
+4) BOOTSTRAP, STARTUP, SHUTDOWN
+====================================================================
+Backend startup sequence (backend/app/main.py):
+1. Build default settings and default agents if storage files are missing.
+2. Instantiate JSON repositories:
+   - settings: backend/data/settings.json
+   - agents: backend/data/agents.json
+3. Instantiate AutomationEngine with settings+agents repos.
+4. Configure CORS (FRONTEND_ORIGIN env, default http://localhost:5173).
+5. Load repositories at startup event.
+6. Start automation engine background thread.
+7. Register routers:
+   - /api/config
+   - /api/databases
+   - /api/agents
+   - /api/automations
+
+Shutdown sequence:
+1. Stop automation engine thread.
+
+Health endpoints:
+- GET /health (backend)
+- GET /health (bridge app)
+
+====================================================================
+5) PERSISTENCE, STATE, AND STORAGE
+====================================================================
+5.1 JSONRepository behavior
+Class: JSONRepository[T]
+- load():
+  - if file missing or empty, create default object and persist it.
+  - parse JSON and validate with model_cls.
+- save(value):
+  - atomic write through temporary file and replace.
+- Thread safety:
+  - per-repository lock serializes load/save/write.
+
+5.2 Stored data files
+- backend/data/settings.json
+  contains AppSettings
+- backend/data/agents.json
+  contains AgentCatalog (agents + audit history)
+- backend/data/exports/manager_runs/*.xlsx
+  created only when manager export option is enabled.
+
+5.3 Runtime-only state
+- AutomationEngine run logs are held in memory (deque maxlen 400).
+- Manager timeline is generated per run and returned/streamed.
+
+====================================================================
+6) DOMAIN OBJECT MODEL (BACKEND)
+====================================================================
+This section describes backend Pydantic model objects and their role.
+
+6.1 LLM and integration models
+- LLMConfig:
+  provider, model, system_prompt, base_url/endpoint, api_key, timeout,
+  temperature, custom headers.
+- WebhookConfig:
+  enable flag, replace playground flag, URL/token/headers, SSL, timeout,
+  include final timeline.
+
+6.2 Database models
+- DatabaseProfileBase / DatabaseProfile / create/update variants.
+- DatabaseConfigExport / Import request / Import response.
+- Engine enum behavior is implicit through Literal values:
+  clickhouse, oracle, elasticsearch.
+
+6.3 Agent models
+- AgentConfigBase / AgentConfig / create/update variants.
+- AgentAuditEntry:
+  immutable snapshot with reason (update/restore).
+- AgentCatalog:
+  active agents list + per-agent audit history.
+- AgentConfigExport / Import request / Import response.
+- AgentTemplate:
+  template descriptor + default config payload.
+
+6.4 Manager and conversation models
+- ManagerConfig:
+  max_steps (1..30), max_agent_calls (1..100).
+- ConversationTurn:
+  role=user|assistant, bounded content.
+- AgentRunRequest / AgentRunResponse.
+- ManagerRunRequest / ManagerRunResponse.
+
+6.5 Automation models
+- AutomationRuleBase / AutomationRule / create/update variants.
+- AutomationRunStep:
+  per-agent chain step result.
+- AutomationRunLog:
+  one automation execution trace.
+
+6.6 Root app model
+- AppSettings:
+  llm, webhook, manager, automations, databases, active_database_id.
+
+6.7 Agent DB requirement helper
+- agent_requires_database(agent_type):
+  true for sql_analyst and clickhouse_table_manager.
+
+====================================================================
+7) FRONTEND TYPE MODEL (CONTRACT MIRROR)
+====================================================================
+The frontend types mirror backend payload contracts to preserve API consistency.
+Key interface groups:
+- Configuration: LLMConfig, WebhookConfig, ManagerConfig, AppConfig.
+- Databases: DatabaseProfile, import/export payload types.
+- Agents: AgentConfig, AgentTemplate, AgentAuditEntry, import/export payload types.
+- Runtime: AgentRunResponse, ConversationTurn, ManagerEvent, ManagerFinalEvent.
+- Automation: AutomationRule, AutomationRunStep, AutomationRunLog.
+
+Notable point:
+- Frontend includes AgentType union with an extra literal `knowledge_data_dictionary`
+  that is not present in backend AgentType. This should be considered a typing drift risk.
+
+====================================================================
+8) API SPECIFICATION (ROUTERS)
+====================================================================
+8.1 /api/config router
+- GET /config
+  returns AppSettings.
+- GET /config/llm
+- PUT /config/llm
+- POST /config/llm/test
+- GET /config/llm/models
+- GET /config/manager
+- PUT /config/manager
+- GET /config/webhook
+- PUT /config/webhook
+- POST /config/webhook/test
+- POST /config/network/test
+
+Operational behavior:
+- LLM test and model listing run through LLMClient abstraction.
+- webhook/test uses WebhookDispatcher.send_test_event.
+- network/test performs DNS + HTTP reachability probes and returns status
+  in {ok, partial, blocked}.
+
+8.2 /api/databases router
+- CRUD for database profiles.
+- PUT /databases/active/{database_id}
+- POST /databases/{database_id}/test
+- GET /databases/export
+- POST /databases/import
+
+Import modes:
+- replace: full replacement with active database reconciliation.
+- merge: update existing IDs + create missing while preserving order.
+
+8.3 /api/agents router
+- GET /agents
+- GET /agents/templates
+- GET /agents/export
+- POST /agents/import
+- POST /agents
+- PUT /agents/{id}
+- DELETE /agents/{id}
+- GET /agents/{id}/audit
+- POST /agents/{id}/audit/{version}/restore
+- POST /agents/{id}/run
+- POST /agents/manager/run
+- POST /agents/manager/run/stream
+
+Special mechanics:
+- Audit snapshots are auto-created on update/restore.
+- Conversation memory normalized to latest 12 turns and 1200 chars each.
+- Optional Excel export of manager timeline.
+- Optional webhook forwarding of stream/sync events.
+
+8.4 /api/automations router
+- CRUD automation rules.
+- GET /automations/{id}/runs
+- Updates reset engine runtime state for the rule.
+
+====================================================================
+9) LLM PROVIDER ABSTRACTION
+====================================================================
+Component: backend/app/core/llm_client.py
+
+Capabilities:
+1. generate(prompt, system_prompt):
+   routes to Ollama or HTTP provider.
+2. test_connection():
+   retrieves model list and basic status details.
+3. list_models():
+   provider-specific discovery.
+
+Important constraints:
+- timeout enforced from LLMConfig.
+- API key is injected as Authorization bearer if custom header absent.
+- System prompt is merged globally (config) + per-call prompt.
+
+Ollama resilience behavior:
+- Generates candidate base URLs for localhost/127.0.0.1/host.docker.internal.
+- Tries multiple candidates before failing.
+
+HTTP extraction behavior:
+- Attempts to parse response text from many common schemas:
+  response, text, output, content, choices[0].message.content, choices[0].text.
+
+====================================================================
+10) LANGGRAPH WORKFLOWS
+====================================================================
+10.1 SQL Analyst LangGraph
+File: backend/app/core/langgraph_agent.py
+
+State keys:
+- question, agent, database, llm, schema, sql, rows, answer.
+
+Node sequence:
+1. schema:
+   connector.schema_snapshot(allowed_tables)
+2. sql:
+   LLM prompt from sql_prompt_template + schema + allowed tables.
+   SQL extracted from markdown fences if needed.
+3. query:
+   connector.run_query(sql, limit=max_rows)
+4. answer:
+   LLM prompt from answer template with JSON rows payload.
+
+Graph edges:
+START -> schema -> sql -> query -> answer -> END
+
+Serialization detail:
+- datetime/date/time in rows are converted through custom JSON default.
+
+10.2 Web Navigator LangGraph
+File: backend/app/core/web_navigation_agent.py
+
+State keys:
+- task, start_url, url, page_content, history, status, error,
+  step, max_steps, allowed_domains, next_action, final_answer,
+  final_rows, browser session.
+
+Node sequence:
+1. bootstrap:
+   open start URL.
+2. read_page:
+   collect simplified page snapshot.
+3. plan_action:
+   LLM outputs strict JSON action:
+   navigate|click|fill|extract|finish.
+4. execute_action:
+   execute browser action through Playwright session.
+5. finalize:
+   LLM writes concise final report from history + snapshot.
+
+Routing rules:
+- After plan: finalize when status terminal or action=finish.
+- After execute: loop to read_page unless terminal.
+
+Runtime prerequisites:
+- Playwright package + Chromium binaries installed.
+
+====================================================================
+11) DATABASE CONNECTORS AND ROUTING
+====================================================================
+11.1 Routing policy
+Function: resolve_database_for_agent(...)
+Resolution order:
+1. requested database_id
+2. agent template_config.database_id
+3. agent template_config.database_name
+4. active database (if compatible)
+5. first compatible profile by engine
+
+Compatibility constraints:
+- sql_analyst -> clickhouse or oracle
+- clickhouse_table_manager -> clickhouse only
+
+11.2 Connector behavior
+ClickHouseConnector:
+- test_connection: SELECT 1
+- schema snapshot from system.columns
+- run_query enforces read-only SQL + auto LIMIT if absent
+- run_statement supports SELECT and command execution
+
+OracleConnector:
+- requires username/password + dsn or host/port/database
+- test_connection via dual
+- schema snapshot from all_tab_columns
+- run_query wraps SQL with ROWNUM <= limit
+- run_statement unsupported in table-manager mode
+
+ElasticsearchConnector:
+- HTTP cluster health check
+- run_query/run_statement not supported for SQL agents
+- schema_snapshot returns informational message only
+
+11.3 Read-only guardrail
+- SQL analyst queries must start with SELECT.
+- Write keywords are blocked by regex (insert/update/delete/drop/alter/etc.).
+
+====================================================================
+12) AGENT EXECUTOR ENGINE (ALL AGENT TYPES)
+====================================================================
+Dispatcher class: AgentExecutor
+Core entrypoint: execute(agent, question, database)
+
+12.1 SQL Analyst
+Modes:
+- llm_sql (default): executes LangGraph SQL pipeline.
+- parameterized_template: fills placeholders in SQL template.
+
+Parameterized mode pipeline:
+1. Normalize parameter schema from template config.
+2. Extract parameter values via LLM JSON + regex fallback.
+3. Coerce values by declared type (string/integer/number/boolean/date).
+4. Render SQL literals safely.
+5. Execute query.
+6. Ask LLM to produce business answer from SQL + rows.
+
+Failure conditions:
+- Missing required parameters.
+- Type coercion failure.
+- Unsupported DB engine.
+
+12.2 ClickHouse Table Manager
+Pipeline:
+1. Build safety policy from template config.
+2. Read schema snapshot.
+3. Ask LLM for strict JSON SQL operations.
+4. Parse operations (JSON, fenced SQL, or split fallback).
+5. Validate each statement against policy.
+6. Execute statements with optional stop_on_error.
+7. Produce operational summary via LLM.
+
+Policy constraints:
+- Always-blocked operation classes: grant/revoke/attach/detach/system/kill.
+- Optional protections for destructive schema operations.
+- Fine-grained insert/update/delete allow flags.
+- max_statements cap.
+
+12.3 Unstructured to Structured
+- Uses output_schema in template_config.
+- Can enforce strict JSON response.
+- Returns parsed JSON or fallback with raw output.
+
+12.4 Email Cleaner
+- Cleans noisy text to structured sections.
+- Controlled by max bullets + include_sections.
+
+12.5 File Assistant and RAG Context
+Common engine:
+- Read files from folder_path.
+- Filter by extensions/size/count.
+- Score by token overlap.
+- For RAG: chunk text and rank chunks.
+- Build context snippets and ask LLM for grounded answer.
+
+12.6 Text File Manager
+Operations:
+- list, read, create, write, append.
+
+Security constraints:
+- All paths are forced inside configured root (safe path resolver).
+- Optional auto-create folder.
+- Optional overwrite policy.
+
+12.7 Excel Manager
+Operations:
+- create_workbook, list_sheets, read_sheet, append_rows, set_cells.
+
+Execution details:
+- Uses openpyxl.
+- Can auto-create workbook.
+- Validates rows and cell updates.
+- Repairs low-quality LLM actions when possible.
+
+12.8 Word Manager
+Operations:
+- create_document, read_document, append_paragraphs, replace_text, list_documents.
+
+Execution details:
+- Uses python-docx.
+- Can auto-create document.
+- Generates concrete prose when action payload is placeholder-like.
+
+12.9 Elasticsearch Retriever
+- Uses _search endpoint with simple_query_string.
+- Supports credentials/api key from template config or DB profile.
+- Returns ranked hits + LLM-grounded summary.
+
+12.10 Internet Search
+- DuckDuckGo HTML search + optional instant API fallback.
+- Returns top_k rows with title/url/snippet.
+
+12.11 RSS News Agent
+Pipeline:
+1. Fetch RSS/Atom feeds.
+2. Parse items and publication dates.
+3. Filter by lookback, interests, exclude keywords.
+4. Score by interest match + recency.
+5. Deduplicate and select top_k.
+6. Produce briefing via LLM.
+
+12.12 Web Scraper
+Pipeline:
+1. Build candidate URLs from config + question URLs/domains.
+2. Optional search fallback.
+3. Crawl pages (optional link following).
+4. Extract title/text snippets.
+5. Produce answer from scraped evidence.
+
+12.13 Web Navigator
+- Delegates to WebNavigationRunner LangGraph browser workflow.
+
+12.14 Wikipedia Retriever
+- Query MediaWiki API, with fallback to OpenSearch on rate/forbidden scenarios.
+- Retrieves summaries and links, then asks LLM for cited synthesis.
+
+====================================================================
+13) MULTI-AGENT MANAGER SPECIFICATION
+====================================================================
+Component: MultiAgentManager
+
+13.1 Runtime state
+- enabled_agents: currently enabled catalog subset.
+- unavailable_agents: runtime-marked unavailable agent map.
+- history: execution observations used for planning and fallback.
+- conversation_memory: normalized prior turns.
+
+13.2 Event model
+The manager streams these events:
+- manager_start
+- manager_decision
+- manager_warning
+- agent_call_started
+- agent_call_completed
+- agent_call_failed
+- agent_marked_unavailable
+- manager_final
+
+13.3 Decision loop algorithm
+Step-by-step:
+1. Emit manager_start with budget and available agents.
+2. If no plannable agents, finalize as blocked.
+3. For each step until limits:
+   a. Ask LLM for strict JSON decision (continue/done/blocked + calls).
+   b. Deduplicate calls by signature.
+   c. Adapt decision for progressive data analysis if needed.
+   d. Emit manager_decision.
+   e. If done/blocked -> emit manager_final.
+   f. Execute planned calls sequentially (budget-guarded).
+   g. Emit started/completed/failed events.
+   h. Optionally mark agent unavailable after runtime failure patterns.
+   i. Try early finalization gate after successful results.
+4. If limits exhausted, finalize with status exhausted.
+
+13.4 Data-analysis adaptation layer
+Purpose:
+- Avoid premature finalization in SQL analytical requests.
+
+State tracking includes:
+- successful SQL calls count
+- tables touched
+- columns observed
+- where-clause coverage
+- cross-table query count
+
+Behavior:
+- If evidence is incomplete, manager injects SQL bootstrap calls.
+- Encourages progression:
+  table discovery -> scoped filtering -> cross-table validation -> synthesis.
+
+13.5 Finalization and fallback behavior
+- Normalizes final answer to avoid placeholder values (none/null/empty).
+- If missing, uses latest reliable successful answer.
+- Generates manager_summary (LLM) with strict structure fallback.
+- Generates sanity judge report (LLM) with heuristic fallback.
+
+13.6 Missing-information inference
+Priority:
+1. Runtime unavailable agents summary.
+2. Recent blocking errors.
+3. Generic capability/budget shortfall suggestion.
+
+====================================================================
+14) MANAGER STREAMING, WEBHOOKS, AND EXCEL EXPORT
+====================================================================
+14.1 Streaming endpoint behavior
+Endpoint: POST /api/agents/manager/run/stream
+- Returns NDJSON stream.
+- Each line is one manager event object.
+- Final event type must be manager_final.
+
+14.2 Sync endpoint behavior
+Endpoint: POST /api/agents/manager/run
+- Runs full stream internally.
+- Returns consolidated ManagerRunResponse with timeline.
+
+14.3 Optional Excel export
+Trigger:
+- request.export_intermediate_results_to_excel = true
+
+Workbook contents:
+- run_summary
+- timeline_events
+- agent_calls
+- raw_events
+
+Enriched final event fields:
+- intermediate_results_excel_path
+- intermediate_results_excel_error
+
+Excel constraints:
+- Requires openpyxl.
+- Cell text truncation guards are applied.
+
+14.4 Webhook forwarding
+If webhook enabled + URL configured:
+- Every event is sent through WebhookDispatcher.
+- Envelope includes run context, sequence, event, final flag.
+- Optional final timeline embedding (capped to 400 events).
+
+====================================================================
+15) OPEN WEBUI BRIDGE PROCESS
+====================================================================
+Bridge app receives manager_event payloads and forwards normalized chat-like messages
+(`content`/`text`) to Open WebUI webhook target.
+
+Bridge runtime controls via env:
+- OPEN_WEBUI_WEBHOOK_URL
+- OPEN_WEBUI_AUTH_TOKEN
+- OPEN_WEBUI_EXTRA_HEADERS_JSON
+- OPEN_WEBUI_BRIDGE_TIMEOUT_SECONDS
+- OPEN_WEBUI_BRIDGE_VERIFY_SSL
+- optional summary/raw payload toggles.
+
+Processing chain:
+1. Validate incoming JSON object.
+2. Build readable message from event type + timeline summary.
+3. Build outbound payload with metadata.
+4. POST to Open WebUI endpoint.
+5. Return forwarding status and latency.
+
+====================================================================
+16) AUTOMATION ENGINE PROCESS
+====================================================================
+Component: AutomationEngine
+
+16.1 Thread lifecycle
+- start(): starts daemon loop thread.
+- stop(): stops loop via event and join timeout.
+
+16.2 Rule scanning loop
+For each enabled automation rule:
+1. Check poll interval gate.
+2. Snapshot watched files (recursive or not).
+3. Detect newly seen paths compared to previous snapshot.
+4. Limit processed events per scan.
+5. For each new file, execute configured agent chain.
+
+16.3 Agent chain execution
+For each agent id in rule.agent_chain:
+1. Resolve enabled agent.
+2. Resolve compatible database (if required).
+3. Execute agent with current prompt/question.
+4. Store step result.
+5. If successful answer exists, feed it as next question to subsequent agent.
+6. On failure, stop chain and log partial/failed status.
+
+16.4 Automation run logs
+Stored in memory deque with:
+- metadata (rule id/name, file path, timestamps)
+- per-step statuses
+- final answer and error summary
+
+16.5 Error-throttling behavior
+Repeated watch-path errors are rate-limited by cooldown to avoid log spam.
+
+====================================================================
+17) FRONTEND FUNCTIONAL SPECIFICATION
+====================================================================
+17.1 App shell (App.tsx)
+- Loads config + agents on bootstrap.
+- Maintains current tab and global notifications.
+- Passes data and callbacks to tab components.
+
+17.2 API client (api.ts)
+- Centralized request() wrapper with JSON error normalization.
+- Full typed functions for config/databases/agents/automations/runtime endpoints.
+- Stream parser for manager NDJSON (runManagerStream).
+
+17.3 Configuration tab (ConfigurationTab.tsx)
+Functional domains:
+- LLM configuration + test + model refresh.
+- Internet access diagnostics.
+- Webhook configuration + test.
+- Manager limits configuration.
+- Automation rules CRUD and run logs.
+- Database profiles CRUD + active selection + import/export.
+
+17.4 Agents tab (AgentsTab.tsx)
+Functional domains:
+- Agent templates fetch and guided creation flow.
+- Agent CRUD and audit restore flow.
+- Manager budget update shortcut.
+- Agent config import/export.
+- Assisted template-config editors per agent type.
+- Advanced JSON and prompt toggles.
+
+17.5 Playground tab (PlaygroundTab.tsx)
+Functional domains:
+- Mode selection (single vs manager).
+- Conversation memory toggle + retention (max 12 turns).
+- Manager streaming timeline visualization.
+- Live workflow modal.
+- Final answer + confidence + summary + judge checks UI.
+- Optional Excel export toggle for manager run.
+
+====================================================================
+18) CONSTRAINTS, GUARDRAILS, AND LIMITS
+====================================================================
+18.1 Manager constraints
+- max_steps: 1..30
+- max_agent_calls: 1..100
+- conversation history normalized to max 12 turns
+
+18.2 Agent constraints
+- sql_analyst: read-only SQL only, ClickHouse/Oracle only.
+- clickhouse_table_manager: ClickHouse only, policy gate on statement types.
+- web_navigator: Playwright runtime dependency.
+
+18.3 Data/serialization constraints
+- datetime serialization guard in SQL and manager export paths.
+- long JSON/text fields truncated for Excel export safety.
+
+18.4 Path safety constraints
+- File/Excel/Word managers enforce operations inside configured root folder.
+- Path traversal outside root is blocked.
+
+18.5 Import constraints
+- Duplicate IDs in import payloads are rejected.
+- Merge/replace semantics differ by endpoint.
+
+====================================================================
+19) END-TO-END PROCESS FLOWS
+====================================================================
+19.1 Initial setup process
+1. Run `npm run setup`.
+2. Frontend deps installed.
+3. Backend venv created and dependencies installed.
+4. Playwright Chromium installation attempted.
+5. Run `npm run dev` to start frontend+backend.
+
+19.2 Basic configuration process
+1. Open Settings tab.
+2. Configure LLM and validate model connection.
+3. Create at least one database profile.
+4. Set active database.
+5. (Optional) configure webhook and test it.
+
+19.3 Agent design process
+1. Open Agents tab.
+2. Create new agent from template.
+3. Fill minimal operational fields.
+4. Save and optionally refine advanced JSON/prompt sections.
+5. Verify agent appears enabled.
+
+19.4 Single-agent execution process
+1. Open Playground in single mode.
+2. Select agent and enter question.
+3. Submit request.
+4. Backend routes through AgentExecutor.
+5. UI displays answer, SQL (if any), rows, details.
+
+19.5 Manager execution process
+1. Open Playground in manager mode.
+2. Enter request (optional memory + Excel export flag).
+3. Stream starts and timeline updates in real-time.
+4. Manager orchestrates calls and emits events.
+5. Final event includes answer, summary, judge outputs.
+6. If enabled, Excel path/error is shown.
+
+19.6 Automation execution process
+1. Configure rule with watch path and agent chain.
+2. Engine scans for new files at poll interval.
+3. New file event triggers chained agent execution.
+4. Run logs visible in configuration tab.
+
+====================================================================
+20) OPERATIONS, OBSERVABILITY, TROUBLESHOOTING
+====================================================================
+20.1 What to inspect first
+- Backend health: GET /health
+- LLM test: /api/config/llm/test
+- DB test: /api/databases/{id}/test
+- Network probe: /api/config/network/test
+- Manager timeline in Playground
+
+20.2 Typical failures and causes
+- “Object of type datetime is not JSON serializable”:
+  solved by safe serialization helpers in manager/export/SQL paths.
+- Web navigator unavailable:
+  Playwright package or Chromium missing.
+- Manager has summary but no answer:
+  final-answer normalization and fallback logic should now backfill from best
+  successful observation or status-default string.
+- SQL agent blocked:
+  non-SELECT query or unsupported engine profile.
+
+20.3 Safe runtime practices
+- Keep destructive operations disabled by default in ClickHouse manager.
+- Use DB profile scoping via template_config.database_id.
+- Keep webhook disabled in environments without secure outbound control.
+
+====================================================================
+21) EXTENDING THE APPLICATION (ENGINEERING PROCESS)
+====================================================================
+To add a new agent type safely, follow this sequence:
+1. Add backend AgentType literal in models.py.
+2. Add default template in agent_templates.py.
+3. Implement execution method in AgentExecutor and dispatch branch.
+4. Add required DB routing rule if applicable.
+5. Update frontend AgentType union and assisted UI fields in AgentsTab.
+6. Validate end-to-end from single mode and manager mode.
+7. Add/update docs and import/export compatibility.
+
+To add a new manager event:
+1. Emit event through manager `_event` helper.
+2. Ensure front timeline cards can parse and render it.
+3. Ensure webhook consumer compatibility.
+4. Update type unions and docs.
+
+To add a new connector engine:
+1. Extend DatabaseProfile engine literal.
+2. Add connector implementation + connector_for mapping.
+3. Update database routing compatibility logic.
+4. Add UI engine option and draft defaults.
+
+====================================================================
+22) OBJECT INDEX (HUMAN-READABLE)
+====================================================================
+Backend object groups by file:
+- app/core/models.py:
+  LLMConfig, WebhookConfig, Database* models, Agent* models, Manager*
+  models, Automation* models, AppSettings, ConversationTurn, AgentTemplate.
+- app/core/multi_agent_manager.py:
+  ManagerCall, ManagerDecision, ManagerJudgeReport, MultiAgentManager.
+- app/core/langgraph_agent.py:
+  AgentState, LangGraphAgentRunner.
+- app/core/web_navigation_agent.py:
+  NavigationAction, NavigationState, _BrowserSession, WebNavigationRunner.
+- app/core/storage.py:
+  JSONRepository.
+- app/core/webhook_dispatcher.py:
+  WebhookDispatcher.
+
+Frontend object groups by file:
+- src/types.ts:
+  all contract interfaces and union types.
+- component local interfaces:
+  AgentsTabProps, ConfigurationTabProps, PlaygroundTabProps, local draft
+  and helper structures.
+
+====================================================================
+23) STEP-BY-STEP CHAINING MAPS (FUNCTIONAL)
+====================================================================
+23.1 Single agent run chain
+UI `PlaygroundTab.executeSingle` -> API `runAgent` -> backend route `/agents/{id}/run`
+-> database resolution -> `AgentExecutor.execute` -> typed handler -> return response
+-> UI updates conversation memory and renders details.
+
+23.2 Manager stream chain
+UI `PlaygroundTab.executeManager` -> API `runManagerStream`
+-> backend route `/agents/manager/run/stream`
+-> `MultiAgentManager.run_stream` event generator
+-> each NDJSON line parsed by frontend and appended to timeline
+-> final manager event stored in `managerFinal` with summary/judge fields.
+
+23.3 Automation chain
+AutomationEngine loop -> detect new file -> build prompt
+-> sequential `AgentExecutor.execute` for each chain item
+-> step logs + final run status stored in deque
+-> UI reads via `/automations/{id}/runs`.
+
+23.4 Webhook chain
+Manager event produced -> router forwards through WebhookDispatcher
+-> envelope added (run context + sequence + optional timeline)
+-> external system receives payload.
+
+23.5 Open WebUI bridge chain
+External webhook sends manager event to bridge
+-> bridge transforms into chat text payload
+-> forwards to Open WebUI endpoint.
+
+====================================================================
+24) COMPLIANCE CHECKLIST FOR CHANGE REVIEWS
+====================================================================
+Use this list before merging major changes:
+- [ ] Backend models and frontend types still aligned.
+- [ ] New agent types added in both backend and frontend unions.
+- [ ] Manager final event always includes a non-empty answer fallback.
+- [ ] Datetime-safe serialization preserved in export and JSON payload paths.
+- [ ] SQL safety policies unchanged unless explicitly intended.
+- [ ] File-based agents still enforce root path boundaries.
+- [ ] Streaming endpoint still always yields a manager_final event.
+- [ ] Webhook payload schema remains backward compatible.
+- [ ] Automation run logs remain bounded.
+- [ ] Setup scripts still install required runtime dependencies.
+
+====================================================================
+APPENDIX A - BACKEND MODEL CLASS INDEX (SOURCE-EXTRACTED)
+====================================================================
+41:class LLMConfig(BaseModel):
+53:class WebhookConfig(BaseModel):
+64:class DatabaseProfileBase(BaseModel):
+77:class DatabaseProfile(DatabaseProfileBase):
+81:class DatabaseProfileCreate(DatabaseProfileBase):
+85:class DatabaseProfileUpdate(DatabaseProfileBase):
+89:class DatabaseConfigExport(BaseModel):
+97:class DatabaseConfigImportRequest(BaseModel):
+102:class DatabaseConfigImportResponse(BaseModel):
+111:class AgentConfigBase(BaseModel):
+124:class AgentConfig(AgentConfigBase):
+128:class AgentConfigCreate(AgentConfigBase):
+132:class AgentConfigUpdate(AgentConfigBase):
+136:class AgentAuditEntry(BaseModel):
+143:class AgentCatalog(BaseModel):
+148:class AgentConfigExport(BaseModel):
+156:class AgentConfigImportRequest(BaseModel):
+162:class AgentConfigImportResponse(BaseModel):
+171:class ManagerConfig(BaseModel):
+176:class AutomationRuleBase(BaseModel):
+194:class AutomationRule(AutomationRuleBase):
+198:class AutomationRuleCreate(AutomationRuleBase):
+202:class AutomationRuleUpdate(AutomationRuleBase):
+206:class AutomationRunStep(BaseModel):
+216:class AutomationRunLog(BaseModel):
+231:class AppSettings(BaseModel):
+240:class ConversationTurn(BaseModel):
+245:class AgentRunRequest(BaseModel):
+251:class AgentRunResponse(BaseModel):
+260:class ManagerRunRequest(BaseModel):
+269:class ManagerRunResponse(BaseModel):
+287:class AgentTemplate(BaseModel):
+
+====================================================================
+APPENDIX B - FRONTEND TYPE INDEX (SOURCE-EXTRACTED)
+====================================================================
+1:export type LLMProvider = "ollama" | "http";
+2:export type DatabaseEngine = "clickhouse" | "oracle" | "elasticsearch";
+3:export type AgentType =
+21:export interface LLMConfig {
+33:export interface InternetAccessCheck {
+42:export interface InternetAccessTestResponse {
+51:export interface ManagerConfig {
+56:export interface WebhookConfig {
+67:export interface DatabaseProfile {
+81:export interface DatabaseConfigExportPayload {
+89:export interface DatabaseConfigImportResponse {
+98:export interface AgentConfig {
+112:export interface AgentTemplate {
+119:export interface AgentAuditEntry {
+126:export interface AgentConfigExportPayload {
+134:export interface AgentConfigImportResponse {
+143:export interface AppConfig {
+152:export interface AgentRunResponse {
+161:export interface ConversationTurn {
+166:export type ManagerEventType =
+176:export interface ManagerEvent {
+182:export interface ManagerFinalEvent extends ManagerEvent {
+200:export interface AutomationRule {
+214:export interface AutomationRunStep {
+224:export interface AutomationRunLog {
+
+====================================================================
+APPENDIX C - API ROUTE INDEX (SOURCE-EXTRACTED)
+====================================================================
+backend/app/api/routers/automations.py:28:@router.get("", response_model=list[AutomationRule])
+backend/app/api/routers/automations.py:36:@router.post("", response_model=AutomationRule, status_code=201)
+backend/app/api/routers/automations.py:50:@router.put("/{automation_id}", response_model=AutomationRule)
+backend/app/api/routers/automations.py:68:@router.delete("/{automation_id}", status_code=204)
+backend/app/api/routers/automations.py:81:@router.get("/{automation_id}/runs", response_model=list[AutomationRunLog])
+backend/app/api/routers/databases.py:42:@router.get("", response_model=list[DatabaseProfile])
+backend/app/api/routers/databases.py:49:@router.post("", response_model=DatabaseProfile, status_code=201)
+backend/app/api/routers/databases.py:63:@router.put("/{database_id}", response_model=DatabaseProfile)
+backend/app/api/routers/databases.py:79:@router.delete("/{database_id}", status_code=204)
+backend/app/api/routers/databases.py:91:@router.put("/active/{database_id}", response_model=AppSettings)
+backend/app/api/routers/databases.py:103:@router.post("/{database_id}/test")
+backend/app/api/routers/databases.py:117:@router.get("/export", response_model=DatabaseConfigExport)
+backend/app/api/routers/databases.py:129:@router.post("/import", response_model=DatabaseConfigImportResponse)
+backend/app/api/routers/config.py:19:@router.get("", response_model=AppSettings)
+backend/app/api/routers/config.py:26:@router.get("/llm", response_model=LLMConfig)
+backend/app/api/routers/config.py:34:@router.put("/llm", response_model=LLMConfig)
+backend/app/api/routers/config.py:45:@router.get("/manager", response_model=ManagerConfig)
+backend/app/api/routers/config.py:53:@router.put("/manager", response_model=ManagerConfig)
+backend/app/api/routers/config.py:64:@router.get("/webhook", response_model=WebhookConfig)
+backend/app/api/routers/config.py:72:@router.put("/webhook", response_model=WebhookConfig)
+backend/app/api/routers/config.py:83:@router.post("/webhook/test")
+backend/app/api/routers/config.py:100:@router.post("/llm/test")
+backend/app/api/routers/config.py:112:@router.get("/llm/models")
+backend/app/api/routers/config.py:129:@router.post("/network/test")
+backend/app/api/routers/agents.py:342:@router.get("", response_model=list[AgentConfig])
+backend/app/api/routers/agents.py:349:@router.get("/templates", response_model=list[AgentTemplate])
+backend/app/api/routers/agents.py:354:@router.get("/export", response_model=AgentConfigExport)
+backend/app/api/routers/agents.py:369:@router.post("/import", response_model=AgentConfigImportResponse)
+backend/app/api/routers/agents.py:437:@router.post("", response_model=AgentConfig, status_code=201)
+backend/app/api/routers/agents.py:449:@router.put("/{agent_id}", response_model=AgentConfig)
+backend/app/api/routers/agents.py:465:@router.get("/{agent_id}/audit", response_model=list[AgentAuditEntry])
+backend/app/api/routers/agents.py:475:@router.post("/{agent_id}/audit/{version_id}/restore", response_model=AgentConfig)
+backend/app/api/routers/agents.py:500:@router.delete("/{agent_id}", status_code=204)
+backend/app/api/routers/agents.py:511:@router.post("/{agent_id}/run", response_model=AgentRunResponse)
+backend/app/api/routers/agents.py:563:@router.post("/manager/run", response_model=ManagerRunResponse)
+backend/app/api/routers/agents.py:641:@router.post("/manager/run/stream")
+
+====================================================================
+APPENDIX D - PYTHON FUNCTION AND CLASS INVENTORY (SOURCE-EXTRACTED)
+====================================================================
+Notes:
+- This appendix lists function/class declarations with source line numbers.
+- It includes backend modules and vscode_simple_runner modules.
+backend/app/open_webui_bridge.py:22:def _env_bool(name: str, default: bool) -> bool:
+backend/app/open_webui_bridge.py:34:def _env_float(name: str, default: float) -> float:
+backend/app/open_webui_bridge.py:47:def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 100000) -> int:
+backend/app/open_webui_bridge.py:58:def _truncate(value: Any, limit: int) -> str:
+backend/app/open_webui_bridge.py:65:def _target_url() -> str:
+backend/app/open_webui_bridge.py:69:def _build_forward_headers() -> dict[str, str]:
+backend/app/open_webui_bridge.py:102:def _event_preview(event: dict[str, Any]) -> list[str]:
+backend/app/open_webui_bridge.py:176:def _timeline_summary(incoming: dict[str, Any]) -> list[str]:
+backend/app/open_webui_bridge.py:197:def _build_openwebui_message(incoming: dict[str, Any]) -> str:
+backend/app/open_webui_bridge.py:232:def _forward_to_openwebui(incoming: dict[str, Any]) -> dict[str, Any]:
+backend/app/open_webui_bridge.py:307:def health() -> dict[str, Any]:
+backend/app/open_webui_bridge.py:319:async def relay_agent_events(request: Request) -> dict[str, Any]:
+backend/app/open_webui_bridge.py:332:def relay_test_payload(payload: dict[str, Any]) -> dict[str, Any]:
+backend/app/main.py:16:def _default_settings() -> AppSettings:
+backend/app/main.py:21:def _default_agents() -> AgentCatalog:
+backend/app/main.py:70:def startup() -> None:
+backend/app/main.py:77:def shutdown() -> None:
+backend/app/main.py:82:def health() -> dict[str, str]:
+backend/app/open_webui_bridge.py:22:def _env_bool(name: str, default: bool) -> bool:
+backend/app/open_webui_bridge.py:34:def _env_float(name: str, default: float) -> float:
+backend/app/open_webui_bridge.py:47:def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 100000) -> int:
+backend/app/open_webui_bridge.py:58:def _truncate(value: Any, limit: int) -> str:
+backend/app/open_webui_bridge.py:65:def _target_url() -> str:
+backend/app/open_webui_bridge.py:69:def _build_forward_headers() -> dict[str, str]:
+backend/app/open_webui_bridge.py:102:def _event_preview(event: dict[str, Any]) -> list[str]:
+backend/app/open_webui_bridge.py:176:def _timeline_summary(incoming: dict[str, Any]) -> list[str]:
+backend/app/open_webui_bridge.py:197:def _build_openwebui_message(incoming: dict[str, Any]) -> str:
+backend/app/open_webui_bridge.py:232:def _forward_to_openwebui(incoming: dict[str, Any]) -> dict[str, Any]:
+backend/app/open_webui_bridge.py:307:def health() -> dict[str, Any]:
+backend/app/open_webui_bridge.py:319:async def relay_agent_events(request: Request) -> dict[str, Any]:
+backend/app/open_webui_bridge.py:332:def relay_test_payload(payload: dict[str, Any]) -> dict[str, Any]:
+vscode_simple_runner/config_page.py:183:def _template_defaults(template_id: str) -> dict[str, Any]:
+vscode_simple_runner/config_page.py:198:def build_agent(
+backend/app/core/webhook_dispatcher.py:14:class WebhookDispatcher:
+backend/app/core/webhook_dispatcher.py:15:    def __init__(self, config: WebhookConfig) -> None:
+backend/app/core/webhook_dispatcher.py:18:    def send_manager_event(
+backend/app/core/webhook_dispatcher.py:50:    def send_test_event(self) -> dict[str, Any]:
+backend/app/core/webhook_dispatcher.py:69:    def _build_headers(self) -> dict[str, str]:
+backend/app/core/webhook_dispatcher.py:88:    def _post_json(self, *, payload: dict[str, Any], force_send: bool) -> dict[str, Any]:
+backend/app/main.py:16:def _default_settings() -> AppSettings:
+backend/app/main.py:21:def _default_agents() -> AgentCatalog:
+backend/app/main.py:70:def startup() -> None:
+backend/app/main.py:77:def shutdown() -> None:
+backend/app/main.py:82:def health() -> dict[str, str]:
+backend/app/api/deps.py:10:def get_settings_repo(request: Request) -> JSONRepository[AppSettings]:
+backend/app/api/deps.py:14:def get_agents_repo(request: Request) -> JSONRepository[AgentCatalog]:
+backend/app/api/deps.py:18:def get_automation_engine(request: Request) -> AutomationEngine:
+backend/app/core/webhook_dispatcher.py:14:class WebhookDispatcher:
+backend/app/core/webhook_dispatcher.py:15:    def __init__(self, config: WebhookConfig) -> None:
+backend/app/core/webhook_dispatcher.py:18:    def send_manager_event(
+backend/app/core/webhook_dispatcher.py:50:    def send_test_event(self) -> dict[str, Any]:
+backend/app/core/webhook_dispatcher.py:69:    def _build_headers(self) -> dict[str, str]:
+backend/app/core/webhook_dispatcher.py:88:    def _post_json(self, *, payload: dict[str, Any], force_send: bool) -> dict[str, Any]:
+backend/app/api/deps.py:10:def get_settings_repo(request: Request) -> JSONRepository[AppSettings]:
+backend/app/api/deps.py:14:def get_agents_repo(request: Request) -> JSONRepository[AgentCatalog]:
+backend/app/api/deps.py:18:def get_automation_engine(request: Request) -> AutomationEngine:
+vscode_simple_runner/run_vscode_agent_app.py:56:class RuntimeConfig:
+vscode_simple_runner/run_vscode_agent_app.py:64:def _load_config_module() -> Any:
+vscode_simple_runner/run_vscode_agent_app.py:80:def load_runtime_config() -> RuntimeConfig:
+vscode_simple_runner/run_vscode_agent_app.py:110:def _input(prompt: str) -> str:
+vscode_simple_runner/run_vscode_agent_app.py:117:def print_config_summary(cfg: RuntimeConfig) -> None:
+vscode_simple_runner/run_vscode_agent_app.py:149:def test_llm(cfg: RuntimeConfig) -> None:
+vscode_simple_runner/run_vscode_agent_app.py:168:def test_databases(cfg: RuntimeConfig) -> None:
+vscode_simple_runner/run_vscode_agent_app.py:184:def choose_agent(cfg: RuntimeConfig) -> AgentConfig | None:
+vscode_simple_runner/run_vscode_agent_app.py:207:def _render_json_preview(rows: list[dict[str, Any]], max_items: int = 5) -> str:
+vscode_simple_runner/run_vscode_agent_app.py:212:def run_single_agent(
+vscode_simple_runner/run_vscode_agent_app.py:268:def _print_manager_event(event: dict[str, Any]) -> None:
+vscode_simple_runner/run_vscode_agent_app.py:322:def run_manager(
+vscode_simple_runner/run_vscode_agent_app.py:393:def print_menu() -> None:
+vscode_simple_runner/run_vscode_agent_app.py:406:def main() -> int:
+backend/app/api/routers/automations.py:21:def _find_automation(settings: AppSettings, automation_id: str) -> AutomationRule:
+backend/app/api/routers/automations.py:29:def list_automations(
+backend/app/api/routers/automations.py:37:def create_automation(
+backend/app/api/routers/automations.py:51:def update_automation(
+backend/app/api/routers/automations.py:69:def delete_automation(
+backend/app/api/routers/automations.py:82:def list_automation_runs(
+backend/app/api/routers/automations.py:21:def _find_automation(settings: AppSettings, automation_id: str) -> AutomationRule:
+backend/app/api/routers/automations.py:29:def list_automations(
+backend/app/api/routers/automations.py:37:def create_automation(
+backend/app/api/routers/automations.py:51:def update_automation(
+backend/app/api/routers/automations.py:69:def delete_automation(
+backend/app/api/routers/automations.py:82:def list_automation_runs(
+backend/app/core/storage.py:13:class JSONRepository(Generic[T]):
+backend/app/core/storage.py:14:    def __init__(
+backend/app/core/storage.py:26:    def load(self) -> T:
+backend/app/core/storage.py:40:    def save(self, value: T) -> T:
+backend/app/core/storage.py:45:    def _write(self, value: T) -> None:
+backend/app/core/langgraph_agent.py:18:def _json_default(value: Any) -> str:
+backend/app/core/langgraph_agent.py:24:class AgentState(TypedDict, total=False):
+backend/app/core/langgraph_agent.py:35:def _extract_sql(raw_text: str) -> str:
+backend/app/core/langgraph_agent.py:42:def _schema_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:48:def _sql_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:60:def _query_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:66:def _answer_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:80:class LangGraphAgentRunner:
+backend/app/core/langgraph_agent.py:81:    def __init__(self) -> None:
+backend/app/core/langgraph_agent.py:96:    def run(
+backend/app/core/langgraph_agent.py:18:def _json_default(value: Any) -> str:
+backend/app/core/langgraph_agent.py:24:class AgentState(TypedDict, total=False):
+backend/app/core/langgraph_agent.py:35:def _extract_sql(raw_text: str) -> str:
+backend/app/core/langgraph_agent.py:42:def _schema_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:48:def _sql_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:60:def _query_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:66:def _answer_node(state: AgentState) -> AgentState:
+backend/app/core/langgraph_agent.py:80:class LangGraphAgentRunner:
+backend/app/core/langgraph_agent.py:81:    def __init__(self) -> None:
+backend/app/core/langgraph_agent.py:96:    def run(
+backend/app/core/llm_client.py:11:class LLMClient:
+backend/app/core/llm_client.py:12:    def __init__(self, config: LLMConfig) -> None:
+backend/app/core/llm_client.py:15:    def generate(self, prompt: str, system_prompt: str = "") -> str:
+backend/app/core/llm_client.py:21:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/llm_client.py:31:    def list_models(self) -> list[str]:
+backend/app/core/llm_client.py:36:    def _generate_ollama(self, prompt: str, system_prompt: str) -> str:
+backend/app/core/llm_client.py:55:    def _generate_http(self, prompt: str, system_prompt: str) -> str:
+backend/app/core/llm_client.py:79:    def _list_ollama_models(self) -> list[str]:
+backend/app/core/llm_client.py:84:    def _ollama_request(self, method: str, path: str, **kwargs: Any) -> Any:
+backend/app/core/llm_client.py:106:    def _ollama_base_candidates(self) -> list[str]:
+backend/app/core/llm_client.py:132:    def _normalize_base_url(base_url: str) -> str:
+backend/app/core/llm_client.py:140:    def _list_http_models(self) -> list[str]:
+backend/app/core/llm_client.py:160:    def _http_model_urls(self) -> list[str]:
+backend/app/core/llm_client.py:177:    def _to_models_endpoint(url: str) -> str:
+backend/app/core/llm_client.py:188:    def _headers(self) -> dict[str, str]:
+backend/app/core/llm_client.py:194:    def _merged_system_prompt(self, call_system_prompt: str) -> str:
+backend/app/core/llm_client.py:204:    def _extract_text(body: Any) -> str:
+backend/app/core/llm_client.py:227:    def _extract_model_names(body: Any) -> list[str]:
+backend/app/core/llm_client.py:230:        def collect(item: Any) -> None:
+backend/app/core/storage.py:13:class JSONRepository(Generic[T]):
+backend/app/core/storage.py:14:    def __init__(
+backend/app/core/storage.py:26:    def load(self) -> T:
+backend/app/core/storage.py:40:    def save(self, value: T) -> T:
+backend/app/core/storage.py:45:    def _write(self, value: T) -> None:
+backend/app/core/automation_engine.py:24:class AutomationEngine:
+backend/app/core/automation_engine.py:25:    def __init__(
+backend/app/core/automation_engine.py:42:    def start(self) -> None:
+backend/app/core/automation_engine.py:49:    def stop(self) -> None:
+backend/app/core/automation_engine.py:54:    def reset_rule_state(self, rule_id: str) -> None:
+backend/app/core/automation_engine.py:60:    def list_runs(self, automation_id: str | None = None, limit: int = 50) -> list[AutomationRunLog]:
+backend/app/core/automation_engine.py:68:    def _loop(self) -> None:
+backend/app/core/automation_engine.py:102:    def _scan_rule(self, rule: AutomationRule, settings: AppSettings, catalog: AgentCatalog, now: float) -> None:
+backend/app/core/automation_engine.py:125:    def _snapshot_files(self, rule: AutomationRule) -> dict[str, int]:
+backend/app/core/automation_engine.py:148:    def _normalize_extensions(values: list[str]) -> set[str]:
+backend/app/core/automation_engine.py:162:    def _run_rule_for_file(
+backend/app/core/automation_engine.py:254:    def _record_rule_error_once(self, rule: AutomationRule, error: str, now: float) -> None:
+backend/app/core/automation_engine.py:279:    def _render_prompt(template: str, *, file_path: str, event_type: str) -> str:
+backend/app/core/automation_engine.py:296:    def _now_iso() -> str:
+backend/app/api/routers/agents.py:46:def _find_agent(catalog: AgentCatalog, agent_id: str) -> AgentConfig:
+backend/app/api/routers/agents.py:53:def _find_agent_index(catalog: AgentCatalog, agent_id: str) -> int:
+backend/app/api/routers/agents.py:60:def _append_agent_audit(
+backend/app/api/routers/agents.py:79:def _count_audit_entries(history: dict[str, list[AgentAuditEntry]]) -> int:
+backend/app/api/routers/agents.py:83:def _validate_unique_agent_ids(agents: list[AgentConfig]) -> None:
+backend/app/api/routers/agents.py:98:def _truncate_text(value: str, limit: int) -> str:
+backend/app/api/routers/agents.py:104:def _normalized_conversation_history(turns: list[ConversationTurn]) -> list[ConversationTurn]:
+backend/app/api/routers/agents.py:119:def _contextual_question(question: str, turns: list[ConversationTurn]) -> str:
+backend/app/api/routers/agents.py:136:def _json_default(value: Any) -> str:
+backend/app/api/routers/agents.py:142:def _safe_json_text(value: Any, limit: int = MAX_EXCEL_TEXT_CHARS) -> str:
+backend/app/api/routers/agents.py:150:def _excel_cell_value(value: Any) -> Any:
+backend/app/api/routers/agents.py:160:def _call_event_key(event: dict[str, Any]) -> tuple[str, str, str]:
+backend/app/api/routers/agents.py:168:def _export_manager_intermediate_results_to_excel(
+backend/app/api/routers/agents.py:343:def list_agents(
+backend/app/api/routers/agents.py:350:def get_agent_templates() -> list[AgentTemplate]:
+backend/app/api/routers/agents.py:355:def export_agents_config(
+backend/app/api/routers/agents.py:370:def import_agents_config(
+backend/app/api/routers/agents.py:438:def create_agent(
+backend/app/api/routers/agents.py:450:def update_agent(
+backend/app/api/routers/agents.py:466:def list_agent_audit(
+backend/app/api/routers/agents.py:476:def restore_agent_version(
+backend/app/api/routers/agents.py:501:def delete_agent(
+backend/app/api/routers/agents.py:512:def run_agent(
+backend/app/api/routers/agents.py:564:def run_with_manager(
+backend/app/api/routers/agents.py:642:def run_with_manager_stream(
+backend/app/api/routers/agents.py:663:    def iter_events():
+backend/app/api/routers/agents.py:46:def _find_agent(catalog: AgentCatalog, agent_id: str) -> AgentConfig:
+backend/app/api/routers/agents.py:53:def _find_agent_index(catalog: AgentCatalog, agent_id: str) -> int:
+backend/app/api/routers/agents.py:60:def _append_agent_audit(
+backend/app/api/routers/agents.py:79:def _count_audit_entries(history: dict[str, list[AgentAuditEntry]]) -> int:
+backend/app/api/routers/agents.py:83:def _validate_unique_agent_ids(agents: list[AgentConfig]) -> None:
+backend/app/api/routers/agents.py:98:def _truncate_text(value: str, limit: int) -> str:
+backend/app/api/routers/agents.py:104:def _normalized_conversation_history(turns: list[ConversationTurn]) -> list[ConversationTurn]:
+backend/app/api/routers/agents.py:119:def _contextual_question(question: str, turns: list[ConversationTurn]) -> str:
+backend/app/api/routers/agents.py:136:def _json_default(value: Any) -> str:
+backend/app/api/routers/agents.py:142:def _safe_json_text(value: Any, limit: int = MAX_EXCEL_TEXT_CHARS) -> str:
+backend/app/api/routers/agents.py:150:def _excel_cell_value(value: Any) -> Any:
+backend/app/api/routers/agents.py:160:def _call_event_key(event: dict[str, Any]) -> tuple[str, str, str]:
+backend/app/api/routers/agents.py:168:def _export_manager_intermediate_results_to_excel(
+backend/app/api/routers/agents.py:343:def list_agents(
+backend/app/api/routers/agents.py:350:def get_agent_templates() -> list[AgentTemplate]:
+backend/app/api/routers/agents.py:355:def export_agents_config(
+backend/app/api/routers/agents.py:370:def import_agents_config(
+backend/app/api/routers/agents.py:438:def create_agent(
+backend/app/api/routers/agents.py:450:def update_agent(
+backend/app/api/routers/agents.py:466:def list_agent_audit(
+backend/app/api/routers/agents.py:476:def restore_agent_version(
+backend/app/api/routers/agents.py:501:def delete_agent(
+backend/app/api/routers/agents.py:512:def run_agent(
+backend/app/api/routers/agents.py:564:def run_with_manager(
+backend/app/api/routers/agents.py:642:def run_with_manager_stream(
+backend/app/api/routers/agents.py:663:    def iter_events():
+vscode_simple_runner/streamlit_app.py:63:class RuntimeConfig:
+vscode_simple_runner/streamlit_app.py:71:def _load_config_module() -> Any:
+vscode_simple_runner/streamlit_app.py:84:def _state_from_config_page() -> dict[str, Any]:
+vscode_simple_runner/streamlit_app.py:100:def _load_runtime_state() -> dict[str, Any]:
+vscode_simple_runner/streamlit_app.py:111:def _save_runtime_state(state: dict[str, Any]) -> None:
+vscode_simple_runner/streamlit_app.py:118:def _validate_runtime_state(state: dict[str, Any]) -> RuntimeConfig:
+vscode_simple_runner/streamlit_app.py:142:def _json_text(value: Any) -> str:
+vscode_simple_runner/streamlit_app.py:146:def _parse_json_text(value: str, label: str) -> Any:
+vscode_simple_runner/streamlit_app.py:153:def _new_db_profile() -> dict[str, Any]:
+vscode_simple_runner/streamlit_app.py:169:def _new_agent_from_template(template_id: str, agent_id: str, name: str) -> dict[str, Any]:
+vscode_simple_runner/streamlit_app.py:176:def _init_session_state() -> None:
+vscode_simple_runner/streamlit_app.py:193:def _refresh_selection_ids() -> None:
+vscode_simple_runner/streamlit_app.py:207:def _get_db_by_id(state: dict[str, Any], db_id: str) -> dict[str, Any] | None:
+vscode_simple_runner/streamlit_app.py:214:def _get_agent_by_id(state: dict[str, Any], agent_id: str) -> dict[str, Any] | None:
+vscode_simple_runner/streamlit_app.py:221:def _update_db_in_state(state: dict[str, Any], payload: dict[str, Any]) -> None:
+vscode_simple_runner/streamlit_app.py:237:def _delete_db_in_state(state: dict[str, Any], db_id: str) -> None:
+vscode_simple_runner/streamlit_app.py:248:def _update_agent_in_state(state: dict[str, Any], payload: dict[str, Any]) -> None:
+vscode_simple_runner/streamlit_app.py:264:def _delete_agent_in_state(state: dict[str, Any], agent_id: str) -> None:
+vscode_simple_runner/streamlit_app.py:273:def render_configuration_tab() -> None:
+vscode_simple_runner/streamlit_app.py:509:def render_agents_tab() -> None:
+vscode_simple_runner/streamlit_app.py:672:def _run_single_agent(runtime: RuntimeConfig, agent_id: str, question: str) -> dict[str, Any]:
+vscode_simple_runner/streamlit_app.py:689:def render_playground_tab() -> None:
+vscode_simple_runner/streamlit_app.py:847:def main() -> None:
+backend/app/api/routers/config.py:20:def get_config(
+backend/app/api/routers/config.py:27:def get_llm_config(
+backend/app/api/routers/config.py:35:def update_llm_config(
+backend/app/api/routers/config.py:46:def get_manager_config(
+backend/app/api/routers/config.py:54:def update_manager_config(
+backend/app/api/routers/config.py:65:def get_webhook_config(
+backend/app/api/routers/config.py:73:def update_webhook_config(
+backend/app/api/routers/config.py:84:def test_webhook_delivery(webhook_config: WebhookConfig) -> dict:
+backend/app/api/routers/config.py:101:def test_llm_connection(
+backend/app/api/routers/config.py:113:def list_llm_models(
+backend/app/api/routers/config.py:130:def test_network_access() -> dict:
+backend/app/api/routers/config.py:20:def get_config(
+backend/app/api/routers/config.py:27:def get_llm_config(
+backend/app/api/routers/config.py:35:def update_llm_config(
+backend/app/api/routers/config.py:46:def get_manager_config(
+backend/app/api/routers/config.py:54:def update_manager_config(
+backend/app/api/routers/config.py:65:def get_webhook_config(
+backend/app/api/routers/config.py:73:def update_webhook_config(
+backend/app/api/routers/config.py:84:def test_webhook_delivery(webhook_config: WebhookConfig) -> dict:
+backend/app/api/routers/config.py:101:def test_llm_connection(
+backend/app/api/routers/config.py:113:def list_llm_models(
+backend/app/api/routers/config.py:130:def test_network_access() -> dict:
+backend/app/core/agent_templates.py:458:def list_agent_templates() -> list[AgentTemplate]:
+backend/app/core/agent_templates.py:473:def template_defaults(template_id: str) -> AgentConfigCreate:
+backend/app/api/routers/databases.py:24:def _find_database(settings: AppSettings, database_id: str) -> DatabaseProfile:
+backend/app/api/routers/databases.py:31:def _validate_unique_database_ids(databases: list[DatabaseProfile]) -> None:
+backend/app/api/routers/databases.py:43:def list_databases(
+backend/app/api/routers/databases.py:50:def create_database(
+backend/app/api/routers/databases.py:64:def update_database(
+backend/app/api/routers/databases.py:80:def delete_database(
+backend/app/api/routers/databases.py:92:def set_active_database(
+backend/app/api/routers/databases.py:104:def test_database_connection(
+backend/app/api/routers/databases.py:118:def export_databases_config(
+backend/app/api/routers/databases.py:130:def import_databases_config(
+backend/app/api/routers/databases.py:24:def _find_database(settings: AppSettings, database_id: str) -> DatabaseProfile:
+backend/app/api/routers/databases.py:31:def _validate_unique_database_ids(databases: list[DatabaseProfile]) -> None:
+backend/app/api/routers/databases.py:43:def list_databases(
+backend/app/api/routers/databases.py:50:def create_database(
+backend/app/api/routers/databases.py:64:def update_database(
+backend/app/api/routers/databases.py:80:def delete_database(
+backend/app/api/routers/databases.py:92:def set_active_database(
+backend/app/api/routers/databases.py:104:def test_database_connection(
+backend/app/api/routers/databases.py:118:def export_databases_config(
+backend/app/api/routers/databases.py:130:def import_databases_config(
+backend/app/core/database_routing.py:6:def _required_engines_for_agent(agent_type: str) -> set[str]:
+backend/app/core/database_routing.py:14:def _engine_label(engines: set[str]) -> str:
+backend/app/core/database_routing.py:22:def resolve_database_for_agent(
+backend/app/core/multi_agent_manager.py:27:class ManagerCall(BaseModel):
+backend/app/core/multi_agent_manager.py:32:class ManagerDecision(BaseModel):
+backend/app/core/multi_agent_manager.py:40:class ManagerJudgeReport(BaseModel):
+backend/app/core/multi_agent_manager.py:49:class MultiAgentManager:
+backend/app/core/multi_agent_manager.py:50:    def __init__(
+backend/app/core/multi_agent_manager.py:71:    def run_stream(self, request: ManagerRunRequest):
+backend/app/core/multi_agent_manager.py:489:    def _decide(
+backend/app/core/multi_agent_manager.py:513:    def _manager_prompt(
+backend/app/core/multi_agent_manager.py:599:    def _conversation_memory_text(self) -> str:
+backend/app/core/multi_agent_manager.py:609:    def _history_text(self) -> str:
+backend/app/core/multi_agent_manager.py:668:    def _parse_decision(self, raw_text: str) -> ManagerDecision:
+backend/app/core/multi_agent_manager.py:711:    def _normalize_question(question: str) -> str:
+backend/app/core/multi_agent_manager.py:715:    def _call_signature(self, agent_id: str, question: str) -> str:
+backend/app/core/multi_agent_manager.py:718:    def _dedupe_proposed_calls(self, calls: list[ManagerCall]) -> list[ManagerCall]:
+backend/app/core/multi_agent_manager.py:729:    def _adapt_decision_for_data_analysis(
+backend/app/core/multi_agent_manager.py:805:    def _sql_plannable_agents(self) -> list[AgentConfig]:
+backend/app/core/multi_agent_manager.py:812:    def _next_sql_bootstrap_call(
+backend/app/core/multi_agent_manager.py:854:    def _is_redundant_call(self, agent_id: str, question: str) -> bool:
+backend/app/core/multi_agent_manager.py:872:    def _has_successful_answer(self) -> bool:
+backend/app/core/multi_agent_manager.py:875:    def _latest_success_observation(self) -> dict[str, Any] | None:
+backend/app/core/multi_agent_manager.py:887:    def _is_potentially_final_answer(answer: Any, details: Any) -> bool:
+backend/app/core/multi_agent_manager.py:917:    def _maybe_finalize_after_success(
+backend/app/core/multi_agent_manager.py:992:    def _sql_chain_guidance_text(self, agents: list[AgentConfig]) -> str:
+backend/app/core/multi_agent_manager.py:1013:    def _build_execution_question_for_agent(
+backend/app/core/multi_agent_manager.py:1043:    def _recent_data_dependencies_text(self, limit: int = 6) -> str:
+backend/app/core/multi_agent_manager.py:1095:    def _rows_preview(self, rows: list[Any], max_rows: int = 3) -> list[dict[str, Any]]:
+backend/app/core/multi_agent_manager.py:1107:    def _data_analysis_state(self) -> dict[str, Any]:
+backend/app/core/multi_agent_manager.py:1175:    def _data_analysis_memory_text(self) -> str:
+backend/app/core/multi_agent_manager.py:1212:    def _next_data_action_hint(self, question: str) -> str:
+backend/app/core/multi_agent_manager.py:1241:    def _can_finalize_data_analysis(self, question: str) -> bool:
+backend/app/core/multi_agent_manager.py:1264:    def _is_sql_capable_agent_type(agent_type: str) -> bool:
+backend/app/core/multi_agent_manager.py:1268:    def _is_data_analysis_request(question: str) -> bool:
+backend/app/core/multi_agent_manager.py:1298:    def _needs_cross_table_analysis(question: str) -> bool:
+backend/app/core/multi_agent_manager.py:1316:    def _extract_sql_tables(self, sql: str) -> list[str]:
+backend/app/core/multi_agent_manager.py:1361:    def _sanitize_table_name(raw: Any) -> str:
+backend/app/core/multi_agent_manager.py:1372:    def _is_cross_table_sql(self, sql: str) -> bool:
+backend/app/core/multi_agent_manager.py:1385:    def _extract_where_preview(self, sql: str) -> str:
+backend/app/core/multi_agent_manager.py:1399:    def _json_object_from_text(text: str) -> Any | None:
+backend/app/core/multi_agent_manager.py:1410:    def _normalize_optional_text(value: Any) -> str:
+backend/app/core/multi_agent_manager.py:1413:    def _normalize_final_answer(self, value: Any) -> str:
+backend/app/core/multi_agent_manager.py:1432:    def _default_answer_for_status(
+backend/app/core/multi_agent_manager.py:1441:    def _fallback_answer(self) -> str:
+backend/app/core/multi_agent_manager.py:1456:    def _build_manager_summary(
+backend/app/core/multi_agent_manager.py:1500:    def _summary_snapshot(
+backend/app/core/multi_agent_manager.py:1533:    def _fallback_manager_summary(self, snapshot: dict[str, Any]) -> str:
+backend/app/core/multi_agent_manager.py:1591:    def _truncate_text(value: Any, limit: int) -> str:
+backend/app/core/multi_agent_manager.py:1598:    def _normalize_summary_text(raw: str) -> str:
+backend/app/core/multi_agent_manager.py:1612:    def _run_sanity_judge(
+backend/app/core/multi_agent_manager.py:1665:    def _parse_judge_report(self, raw_text: str) -> ManagerJudgeReport | None:
+backend/app/core/multi_agent_manager.py:1692:    def _fallback_judge_report(
+backend/app/core/multi_agent_manager.py:1760:    def _infer_missing_information(self) -> str:
+backend/app/core/multi_agent_manager.py:1779:    def _plannable_agents(self) -> dict[str, AgentConfig]:
+backend/app/core/multi_agent_manager.py:1786:    def _initialize_runtime_unavailable_agents(self) -> None:
+backend/app/core/multi_agent_manager.py:1805:    def _agent_runtime_hint(agent: AgentConfig) -> str:
+backend/app/core/multi_agent_manager.py:1852:    def _should_mark_unavailable(agent: AgentConfig, error_message: str) -> bool:
+backend/app/core/multi_agent_manager.py:1859:    def _to_bool(value: Any, default: bool) -> bool:
+backend/app/core/multi_agent_manager.py:1871:    def _event(event_type: str, **payload: Any) -> dict[str, Any]:
+backend/app/core/multi_agent_manager.py:1878:    def _final_event(
+backend/app/core/multi_agent_manager.py:27:class ManagerCall(BaseModel):
+backend/app/core/multi_agent_manager.py:32:class ManagerDecision(BaseModel):
+backend/app/core/multi_agent_manager.py:40:class ManagerJudgeReport(BaseModel):
+backend/app/core/multi_agent_manager.py:49:class MultiAgentManager:
+backend/app/core/multi_agent_manager.py:50:    def __init__(
+backend/app/core/multi_agent_manager.py:71:    def run_stream(self, request: ManagerRunRequest):
+backend/app/core/multi_agent_manager.py:489:    def _decide(
+backend/app/core/multi_agent_manager.py:513:    def _manager_prompt(
+backend/app/core/multi_agent_manager.py:599:    def _conversation_memory_text(self) -> str:
+backend/app/core/multi_agent_manager.py:609:    def _history_text(self) -> str:
+backend/app/core/multi_agent_manager.py:668:    def _parse_decision(self, raw_text: str) -> ManagerDecision:
+backend/app/core/multi_agent_manager.py:711:    def _normalize_question(question: str) -> str:
+backend/app/core/multi_agent_manager.py:715:    def _call_signature(self, agent_id: str, question: str) -> str:
+backend/app/core/multi_agent_manager.py:718:    def _dedupe_proposed_calls(self, calls: list[ManagerCall]) -> list[ManagerCall]:
+backend/app/core/multi_agent_manager.py:729:    def _adapt_decision_for_data_analysis(
+backend/app/core/multi_agent_manager.py:805:    def _sql_plannable_agents(self) -> list[AgentConfig]:
+backend/app/core/multi_agent_manager.py:812:    def _next_sql_bootstrap_call(
+backend/app/core/multi_agent_manager.py:854:    def _is_redundant_call(self, agent_id: str, question: str) -> bool:
+backend/app/core/multi_agent_manager.py:872:    def _has_successful_answer(self) -> bool:
+backend/app/core/multi_agent_manager.py:875:    def _latest_success_observation(self) -> dict[str, Any] | None:
+backend/app/core/multi_agent_manager.py:887:    def _is_potentially_final_answer(answer: Any, details: Any) -> bool:
+backend/app/core/multi_agent_manager.py:917:    def _maybe_finalize_after_success(
+backend/app/core/multi_agent_manager.py:992:    def _sql_chain_guidance_text(self, agents: list[AgentConfig]) -> str:
+backend/app/core/multi_agent_manager.py:1013:    def _build_execution_question_for_agent(
+backend/app/core/multi_agent_manager.py:1043:    def _recent_data_dependencies_text(self, limit: int = 6) -> str:
+backend/app/core/multi_agent_manager.py:1095:    def _rows_preview(self, rows: list[Any], max_rows: int = 3) -> list[dict[str, Any]]:
+backend/app/core/multi_agent_manager.py:1107:    def _data_analysis_state(self) -> dict[str, Any]:
+backend/app/core/multi_agent_manager.py:1175:    def _data_analysis_memory_text(self) -> str:
+backend/app/core/multi_agent_manager.py:1212:    def _next_data_action_hint(self, question: str) -> str:
+backend/app/core/multi_agent_manager.py:1241:    def _can_finalize_data_analysis(self, question: str) -> bool:
+backend/app/core/multi_agent_manager.py:1264:    def _is_sql_capable_agent_type(agent_type: str) -> bool:
+backend/app/core/multi_agent_manager.py:1268:    def _is_data_analysis_request(question: str) -> bool:
+backend/app/core/multi_agent_manager.py:1298:    def _needs_cross_table_analysis(question: str) -> bool:
+backend/app/core/multi_agent_manager.py:1316:    def _extract_sql_tables(self, sql: str) -> list[str]:
+backend/app/core/multi_agent_manager.py:1361:    def _sanitize_table_name(raw: Any) -> str:
+backend/app/core/multi_agent_manager.py:1372:    def _is_cross_table_sql(self, sql: str) -> bool:
+backend/app/core/multi_agent_manager.py:1385:    def _extract_where_preview(self, sql: str) -> str:
+backend/app/core/multi_agent_manager.py:1399:    def _json_object_from_text(text: str) -> Any | None:
+backend/app/core/multi_agent_manager.py:1410:    def _normalize_optional_text(value: Any) -> str:
+backend/app/core/multi_agent_manager.py:1413:    def _normalize_final_answer(self, value: Any) -> str:
+backend/app/core/multi_agent_manager.py:1432:    def _default_answer_for_status(
+backend/app/core/multi_agent_manager.py:1441:    def _fallback_answer(self) -> str:
+backend/app/core/multi_agent_manager.py:1456:    def _build_manager_summary(
+backend/app/core/multi_agent_manager.py:1500:    def _summary_snapshot(
+backend/app/core/multi_agent_manager.py:1533:    def _fallback_manager_summary(self, snapshot: dict[str, Any]) -> str:
+backend/app/core/multi_agent_manager.py:1591:    def _truncate_text(value: Any, limit: int) -> str:
+backend/app/core/multi_agent_manager.py:1598:    def _normalize_summary_text(raw: str) -> str:
+backend/app/core/multi_agent_manager.py:1612:    def _run_sanity_judge(
+backend/app/core/multi_agent_manager.py:1665:    def _parse_judge_report(self, raw_text: str) -> ManagerJudgeReport | None:
+backend/app/core/multi_agent_manager.py:1692:    def _fallback_judge_report(
+backend/app/core/multi_agent_manager.py:1760:    def _infer_missing_information(self) -> str:
+backend/app/core/multi_agent_manager.py:1779:    def _plannable_agents(self) -> dict[str, AgentConfig]:
+backend/app/core/multi_agent_manager.py:1786:    def _initialize_runtime_unavailable_agents(self) -> None:
+backend/app/core/multi_agent_manager.py:1805:    def _agent_runtime_hint(agent: AgentConfig) -> str:
+backend/app/core/multi_agent_manager.py:1852:    def _should_mark_unavailable(agent: AgentConfig, error_message: str) -> bool:
+backend/app/core/multi_agent_manager.py:1859:    def _to_bool(value: Any, default: bool) -> bool:
+backend/app/core/multi_agent_manager.py:1871:    def _event(event_type: str, **payload: Any) -> dict[str, Any]:
+backend/app/core/multi_agent_manager.py:1878:    def _final_event(
+backend/app/core/agent_executor.py:26:class AgentExecutor:
+backend/app/core/agent_executor.py:27:    def __init__(self, llm_config: LLMConfig) -> None:
+backend/app/core/agent_executor.py:32:    def execute(
+backend/app/core/agent_executor.py:77:    def _json_default(value: Any) -> str:
+backend/app/core/agent_executor.py:82:    def _json_dumps(self, value: Any) -> str:
+backend/app/core/agent_executor.py:85:    def _run_sql_analyst(
+backend/app/core/agent_executor.py:126:    def _run_sql_parameterized_use_case(
+backend/app/core/agent_executor.py:196:    def _run_clickhouse_table_manager(
+backend/app/core/agent_executor.py:321:    def _plan_clickhouse_table_operations(
+backend/app/core/agent_executor.py:365:    def _extract_sql_operations(
+backend/app/core/agent_executor.py:415:    def _validate_clickhouse_operations(
+backend/app/core/agent_executor.py:445:    def _validate_clickhouse_statement_policy(
+backend/app/core/agent_executor.py:544:    def _split_sql_statements(sql_script: str) -> list[str]:
+backend/app/core/agent_executor.py:580:    def _normalize_sql_use_case_parameters(self, raw_value: Any) -> list[dict[str, Any]]:
+backend/app/core/agent_executor.py:621:    def _normalize_sql_parameter_name(raw_name: Any) -> str:
+backend/app/core/agent_executor.py:636:    def _extract_sql_template_placeholders(sql_template: str) -> list[str]:
+backend/app/core/agent_executor.py:654:    def _extract_sql_use_case_values(
+backend/app/core/agent_executor.py:742:    def _fallback_extract_sql_parameter(question: str, parameter_name: str) -> str | None:
+backend/app/core/agent_executor.py:757:    def _render_sql_use_case_template(
+backend/app/core/agent_executor.py:824:    def _coerce_sql_parameter_value(
+backend/app/core/agent_executor.py:871:    def _sql_parameter_literal(value: Any, value_type: str, database_engine: str) -> str:
+backend/app/core/agent_executor.py:889:    def _is_empty_parameter_value(value: Any) -> bool:
+backend/app/core/agent_executor.py:896:    def _run_unstructured_extractor(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:946:    def _run_email_cleaner(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:972:    def _run_file_assistant(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:993:    def _run_text_file_manager(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1166:    def _run_excel_manager(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1201:        def load_or_create_workbook():
+backend/app/core/agent_executor.py:1397:    def _run_word_manager(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1459:        def load_or_create_document():
+backend/app/core/agent_executor.py:1635:    def _run_elasticsearch_retriever(
+backend/app/core/agent_executor.py:1740:    def _run_rag_context(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1761:    def _run_internet_search(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1802:    def _run_rss_news(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1922:        def sort_key(item: dict[str, Any]) -> tuple[int, int]:
+backend/app/core/agent_executor.py:1970:    def _fetch_rss_feed_items(self, feed_url: str, max_items: int) -> list[dict[str, Any]]:
+backend/app/core/agent_executor.py:2015:    def _parse_rss_feed(
+backend/app/core/agent_executor.py:2068:    def _parse_atom_feed(
+backend/app/core/agent_executor.py:2107:    def _extract_atom_link(self, entry: ET.Element, base_url: str) -> str:
+backend/app/core/agent_executor.py:2133:    def _xml_local_name(tag: str) -> str:
+backend/app/core/agent_executor.py:2142:    def _xml_child_raw_text(
+backend/app/core/agent_executor.py:2157:    def _xml_child_text(
+backend/app/core/agent_executor.py:2165:    def _parse_datetime_value(value: str) -> datetime | None:
+backend/app/core/agent_executor.py:2197:    def _run_web_scraper(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2321:    def _run_web_navigator(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2339:    def _run_wikipedia_retriever(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2374:    def _retrieve_file_context(
+backend/app/core/agent_executor.py:2483:    def _parse_text_file_action(self, question: str, cfg: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2516:    def _parse_excel_action(self, question: str, cfg: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2557:    def _repair_excel_action_if_needed(
+backend/app/core/agent_executor.py:2631:    def _resolve_excel_rows_for_append(
+backend/app/core/agent_executor.py:2672:    def _resolve_excel_cells_for_update(
+backend/app/core/agent_executor.py:2721:    def _normalize_excel_header_key(value: Any) -> str:
+backend/app/core/agent_executor.py:2725:    def _worksheet_headers(worksheet: Any | None) -> list[str]:
+backend/app/core/agent_executor.py:2742:    def _excel_row_has_meaningful_value(cls, row_values: list[Any]) -> bool:
+backend/app/core/agent_executor.py:2758:    def _is_placeholder_excel_value(value: str) -> bool:
+backend/app/core/agent_executor.py:2772:    def _parse_word_action(self, question: str, cfg: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2814:    def _resolve_word_content(
+backend/app/core/agent_executor.py:2854:    def _generate_word_content_from_request(
+backend/app/core/agent_executor.py:2902:    def _is_placeholder_word_text(value: str) -> bool:
+backend/app/core/agent_executor.py:2927:    def _normalize_text_operation(raw_operation: Any) -> str:
+backend/app/core/agent_executor.py:2946:    def _normalize_excel_operation(raw_operation: Any) -> str:
+backend/app/core/agent_executor.py:2966:    def _normalize_word_operation(raw_operation: Any) -> str:
+backend/app/core/agent_executor.py:2991:    def _to_bool(value: Any, default: bool) -> bool:
+backend/app/core/agent_executor.py:3006:    def _to_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+backend/app/core/agent_executor.py:3014:    def _json_safe_cell_value(value: Any) -> Any:
+backend/app/core/agent_executor.py:3020:    def _normalize_excel_rows(raw_rows: Any) -> list[list[Any]]:
+backend/app/core/agent_executor.py:3035:    def _normalize_word_paragraphs(
+backend/app/core/agent_executor.py:3061:    def _to_relative_path(root: Path, target: Path) -> str:
+backend/app/core/agent_executor.py:3069:    def _resolve_managed_root(self, cfg: dict[str, Any]) -> Path:
+backend/app/core/agent_executor.py:3084:    def _resolve_safe_path(
+backend/app/core/agent_executor.py:3109:    def _duckduckgo_web_results(
+backend/app/core/agent_executor.py:3167:    def _duckduckgo_instant_results(self, query: str, top_k: int) -> list[dict[str, Any]]:
+backend/app/core/agent_executor.py:3199:        def collect_related(items: list[Any]) -> None:
+backend/app/core/agent_executor.py:3225:    def _wikipedia_results(
+backend/app/core/agent_executor.py:3337:    def _wikipedia_opensearch_results(
+backend/app/core/agent_executor.py:3395:    def _web_scrape_results(
+backend/app/core/agent_executor.py:3492:    def _extract_urls_from_text(text: str) -> list[str]:
+backend/app/core/agent_executor.py:3505:    def _extract_urls_from_domain_mentions(text: str) -> list[str]:
+backend/app/core/agent_executor.py:3530:    def _domains_from_urls(urls: list[str]) -> list[str]:
+backend/app/core/agent_executor.py:3544:    def _dedupe_urls(urls: list[str]) -> list[str]:
+backend/app/core/agent_executor.py:3556:    def _is_placeholder_start_urls(urls: list[str]) -> bool:
+backend/app/core/agent_executor.py:3570:    def _is_placeholder_allowed_domains(domains: list[str]) -> bool:
+backend/app/core/agent_executor.py:3576:    def _normalize_http_url(value: str) -> str:
+backend/app/core/agent_executor.py:3588:    def _is_url_allowed(url: str, allowed_domains: list[str]) -> bool:
+backend/app/core/agent_executor.py:3601:    def _extract_html_title(html: str) -> str:
+backend/app/core/agent_executor.py:3608:    def _html_to_text(html: str) -> str:
+backend/app/core/agent_executor.py:3623:    def _extract_html_links(html: str, base_url: str, max_links: int) -> list[str]:
+backend/app/core/agent_executor.py:3647:    def _internet_request_headers() -> dict[str, str]:
+backend/app/core/agent_executor.py:3659:    def _browser_request_headers() -> dict[str, str]:
+backend/app/core/agent_executor.py:3672:    def _resolve_duckduckgo_href(raw_href: str) -> str:
+backend/app/core/agent_executor.py:3688:    def _clean_html(value: str) -> str:
+backend/app/core/agent_executor.py:3694:    def _first_sentences(text: str, sentence_count: int) -> str:
+backend/app/core/agent_executor.py:3702:    def _tokenize(text: str) -> set[str]:
+backend/app/core/agent_executor.py:3705:    def _score_text(self, question_tokens: set[str], text: str) -> int:
+backend/app/core/agent_executor.py:3712:    def _chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+backend/app/core/agent_executor.py:3732:    def _parse_json_output(raw_text: str) -> Any | None:
+backend/app/core/db_connectors.py:16:def _validate_read_only_sql(sql: str) -> str:
+backend/app/core/db_connectors.py:27:def _apply_limit(sql: str, limit: int) -> str:
+backend/app/core/db_connectors.py:33:class BaseConnector:
+backend/app/core/db_connectors.py:34:    def __init__(self, profile: DatabaseProfile) -> None:
+backend/app/core/db_connectors.py:37:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:40:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:43:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:46:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:50:class ClickHouseConnector(BaseConnector):
+backend/app/core/db_connectors.py:51:    def _client(self):
+backend/app/core/db_connectors.py:72:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:82:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:108:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:115:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:142:class OracleConnector(BaseConnector):
+backend/app/core/db_connectors.py:143:    def _connection(self):
+backend/app/core/db_connectors.py:165:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:177:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:204:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:216:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:222:class ElasticsearchConnector(BaseConnector):
+backend/app/core/db_connectors.py:223:    def _base_url(self) -> str:
+backend/app/core/db_connectors.py:235:    def _request_kwargs(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:263:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:276:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:282:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:288:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:294:def connector_for(profile: DatabaseProfile) -> BaseConnector:
+backend/app/core/agent_executor.py:26:class AgentExecutor:
+backend/app/core/agent_executor.py:27:    def __init__(self, llm_config: LLMConfig) -> None:
+backend/app/core/agent_executor.py:32:    def execute(
+backend/app/core/agent_executor.py:77:    def _json_default(value: Any) -> str:
+backend/app/core/agent_executor.py:82:    def _json_dumps(self, value: Any) -> str:
+backend/app/core/agent_executor.py:85:    def _run_sql_analyst(
+backend/app/core/agent_executor.py:126:    def _run_sql_parameterized_use_case(
+backend/app/core/agent_executor.py:196:    def _run_clickhouse_table_manager(
+backend/app/core/agent_executor.py:321:    def _plan_clickhouse_table_operations(
+backend/app/core/agent_executor.py:365:    def _extract_sql_operations(
+backend/app/core/agent_executor.py:415:    def _validate_clickhouse_operations(
+backend/app/core/agent_executor.py:445:    def _validate_clickhouse_statement_policy(
+backend/app/core/agent_executor.py:544:    def _split_sql_statements(sql_script: str) -> list[str]:
+backend/app/core/agent_executor.py:580:    def _normalize_sql_use_case_parameters(self, raw_value: Any) -> list[dict[str, Any]]:
+backend/app/core/agent_executor.py:621:    def _normalize_sql_parameter_name(raw_name: Any) -> str:
+backend/app/core/agent_executor.py:636:    def _extract_sql_template_placeholders(sql_template: str) -> list[str]:
+backend/app/core/agent_executor.py:654:    def _extract_sql_use_case_values(
+backend/app/core/agent_executor.py:742:    def _fallback_extract_sql_parameter(question: str, parameter_name: str) -> str | None:
+backend/app/core/agent_executor.py:757:    def _render_sql_use_case_template(
+backend/app/core/agent_executor.py:824:    def _coerce_sql_parameter_value(
+backend/app/core/agent_executor.py:871:    def _sql_parameter_literal(value: Any, value_type: str, database_engine: str) -> str:
+backend/app/core/agent_executor.py:889:    def _is_empty_parameter_value(value: Any) -> bool:
+backend/app/core/agent_executor.py:896:    def _run_unstructured_extractor(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:946:    def _run_email_cleaner(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:972:    def _run_file_assistant(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:993:    def _run_text_file_manager(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1166:    def _run_excel_manager(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1201:        def load_or_create_workbook():
+backend/app/core/agent_executor.py:1397:    def _run_word_manager(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1459:        def load_or_create_document():
+backend/app/core/agent_executor.py:1635:    def _run_elasticsearch_retriever(
+backend/app/core/agent_executor.py:1740:    def _run_rag_context(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1761:    def _run_internet_search(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1802:    def _run_rss_news(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:1922:        def sort_key(item: dict[str, Any]) -> tuple[int, int]:
+backend/app/core/agent_executor.py:1970:    def _fetch_rss_feed_items(self, feed_url: str, max_items: int) -> list[dict[str, Any]]:
+backend/app/core/agent_executor.py:2015:    def _parse_rss_feed(
+backend/app/core/agent_executor.py:2068:    def _parse_atom_feed(
+backend/app/core/agent_executor.py:2107:    def _extract_atom_link(self, entry: ET.Element, base_url: str) -> str:
+backend/app/core/agent_executor.py:2133:    def _xml_local_name(tag: str) -> str:
+backend/app/core/agent_executor.py:2142:    def _xml_child_raw_text(
+backend/app/core/agent_executor.py:2157:    def _xml_child_text(
+backend/app/core/agent_executor.py:2165:    def _parse_datetime_value(value: str) -> datetime | None:
+backend/app/core/agent_executor.py:2197:    def _run_web_scraper(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2321:    def _run_web_navigator(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2339:    def _run_wikipedia_retriever(self, agent: AgentConfig, question: str) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2374:    def _retrieve_file_context(
+backend/app/core/agent_executor.py:2483:    def _parse_text_file_action(self, question: str, cfg: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2516:    def _parse_excel_action(self, question: str, cfg: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2557:    def _repair_excel_action_if_needed(
+backend/app/core/agent_executor.py:2631:    def _resolve_excel_rows_for_append(
+backend/app/core/agent_executor.py:2672:    def _resolve_excel_cells_for_update(
+backend/app/core/agent_executor.py:2721:    def _normalize_excel_header_key(value: Any) -> str:
+backend/app/core/agent_executor.py:2725:    def _worksheet_headers(worksheet: Any | None) -> list[str]:
+backend/app/core/agent_executor.py:2742:    def _excel_row_has_meaningful_value(cls, row_values: list[Any]) -> bool:
+backend/app/core/agent_executor.py:2758:    def _is_placeholder_excel_value(value: str) -> bool:
+backend/app/core/agent_executor.py:2772:    def _parse_word_action(self, question: str, cfg: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/agent_executor.py:2814:    def _resolve_word_content(
+backend/app/core/agent_executor.py:2854:    def _generate_word_content_from_request(
+backend/app/core/agent_executor.py:2902:    def _is_placeholder_word_text(value: str) -> bool:
+backend/app/core/agent_executor.py:2927:    def _normalize_text_operation(raw_operation: Any) -> str:
+backend/app/core/agent_executor.py:2946:    def _normalize_excel_operation(raw_operation: Any) -> str:
+backend/app/core/agent_executor.py:2966:    def _normalize_word_operation(raw_operation: Any) -> str:
+backend/app/core/agent_executor.py:2991:    def _to_bool(value: Any, default: bool) -> bool:
+backend/app/core/agent_executor.py:3006:    def _to_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+backend/app/core/agent_executor.py:3014:    def _json_safe_cell_value(value: Any) -> Any:
+backend/app/core/agent_executor.py:3020:    def _normalize_excel_rows(raw_rows: Any) -> list[list[Any]]:
+backend/app/core/agent_executor.py:3035:    def _normalize_word_paragraphs(
+backend/app/core/agent_executor.py:3061:    def _to_relative_path(root: Path, target: Path) -> str:
+backend/app/core/agent_executor.py:3069:    def _resolve_managed_root(self, cfg: dict[str, Any]) -> Path:
+backend/app/core/agent_executor.py:3084:    def _resolve_safe_path(
+backend/app/core/agent_executor.py:3109:    def _duckduckgo_web_results(
+backend/app/core/agent_executor.py:3167:    def _duckduckgo_instant_results(self, query: str, top_k: int) -> list[dict[str, Any]]:
+backend/app/core/agent_executor.py:3199:        def collect_related(items: list[Any]) -> None:
+backend/app/core/agent_executor.py:3225:    def _wikipedia_results(
+backend/app/core/agent_executor.py:3337:    def _wikipedia_opensearch_results(
+backend/app/core/agent_executor.py:3395:    def _web_scrape_results(
+backend/app/core/agent_executor.py:3492:    def _extract_urls_from_text(text: str) -> list[str]:
+backend/app/core/agent_executor.py:3505:    def _extract_urls_from_domain_mentions(text: str) -> list[str]:
+backend/app/core/agent_executor.py:3530:    def _domains_from_urls(urls: list[str]) -> list[str]:
+backend/app/core/agent_executor.py:3544:    def _dedupe_urls(urls: list[str]) -> list[str]:
+backend/app/core/agent_executor.py:3556:    def _is_placeholder_start_urls(urls: list[str]) -> bool:
+backend/app/core/agent_executor.py:3570:    def _is_placeholder_allowed_domains(domains: list[str]) -> bool:
+backend/app/core/agent_executor.py:3576:    def _normalize_http_url(value: str) -> str:
+backend/app/core/agent_executor.py:3588:    def _is_url_allowed(url: str, allowed_domains: list[str]) -> bool:
+backend/app/core/agent_executor.py:3601:    def _extract_html_title(html: str) -> str:
+backend/app/core/agent_executor.py:3608:    def _html_to_text(html: str) -> str:
+backend/app/core/agent_executor.py:3623:    def _extract_html_links(html: str, base_url: str, max_links: int) -> list[str]:
+backend/app/core/agent_executor.py:3647:    def _internet_request_headers() -> dict[str, str]:
+backend/app/core/agent_executor.py:3659:    def _browser_request_headers() -> dict[str, str]:
+backend/app/core/agent_executor.py:3672:    def _resolve_duckduckgo_href(raw_href: str) -> str:
+backend/app/core/agent_executor.py:3688:    def _clean_html(value: str) -> str:
+backend/app/core/agent_executor.py:3694:    def _first_sentences(text: str, sentence_count: int) -> str:
+backend/app/core/agent_executor.py:3702:    def _tokenize(text: str) -> set[str]:
+backend/app/core/agent_executor.py:3705:    def _score_text(self, question_tokens: set[str], text: str) -> int:
+backend/app/core/agent_executor.py:3712:    def _chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+backend/app/core/agent_executor.py:3732:    def _parse_json_output(raw_text: str) -> Any | None:
+backend/app/core/web_navigation_agent.py:24:def web_navigator_runtime_status(*, force_refresh: bool = False) -> tuple[bool, str | None]:
+backend/app/core/web_navigation_agent.py:61:class NavigationAction(TypedDict, total=False):
+backend/app/core/web_navigation_agent.py:70:class NavigationState(TypedDict, total=False):
+backend/app/core/web_navigation_agent.py:87:class _BrowserSession:
+backend/app/core/web_navigation_agent.py:88:    def __init__(self, *, headless: bool, timeout_ms: int, capture_html_chars: int) -> None:
+backend/app/core/web_navigation_agent.py:97:    def start(self) -> None:
+backend/app/core/web_navigation_agent.py:112:    def close(self) -> None:
+backend/app/core/web_navigation_agent.py:123:    def navigate_to(self, url: str) -> str:
+backend/app/core/web_navigation_agent.py:129:    def fill_form(self, selector: str, text: str) -> None:
+backend/app/core/web_navigation_agent.py:134:    def click_element(self, selector: str) -> None:
+backend/app/core/web_navigation_agent.py:139:    def current_url(self) -> str:
+backend/app/core/web_navigation_agent.py:144:    def simplified_dom(self) -> str:
+backend/app/core/web_navigation_agent.py:154:class WebNavigationRunner:
+backend/app/core/web_navigation_agent.py:155:    def __init__(
+backend/app/core/web_navigation_agent.py:189:    def run(self, *, task: str, config: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/web_navigation_agent.py:260:    def _bootstrap_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:273:    def _read_page_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:282:    def _plan_action_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:317:    def _execute_action_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:368:    def _route_after_plan(state: NavigationState) -> str:
+backend/app/core/web_navigation_agent.py:377:    def _route_after_execute(state: NavigationState) -> str:
+backend/app/core/web_navigation_agent.py:382:    def _finalize_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:412:    def _parse_action(raw_text: str) -> NavigationAction:
+backend/app/core/web_navigation_agent.py:440:    def _parse_json(raw_text: str) -> Any:
+backend/app/core/web_navigation_agent.py:459:    def _extract_first_url(text: str) -> str:
+backend/app/core/web_navigation_agent.py:471:    def _normalize_http_url(raw: str) -> str:
+backend/app/core/web_navigation_agent.py:489:    def _is_placeholder_start_url(raw: str) -> bool:
+backend/app/core/web_navigation_agent.py:499:    def _normalize_domains(raw: Any) -> list[str]:
+backend/app/core/web_navigation_agent.py:509:    def _to_bool(value: Any, default: bool) -> bool:
+backend/app/core/web_navigation_agent.py:524:    def _to_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+backend/app/core/llm_client.py:11:class LLMClient:
+backend/app/core/llm_client.py:12:    def __init__(self, config: LLMConfig) -> None:
+backend/app/core/llm_client.py:15:    def generate(self, prompt: str, system_prompt: str = "") -> str:
+backend/app/core/llm_client.py:21:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/llm_client.py:31:    def list_models(self) -> list[str]:
+backend/app/core/llm_client.py:36:    def _generate_ollama(self, prompt: str, system_prompt: str) -> str:
+backend/app/core/llm_client.py:55:    def _generate_http(self, prompt: str, system_prompt: str) -> str:
+backend/app/core/llm_client.py:79:    def _list_ollama_models(self) -> list[str]:
+backend/app/core/llm_client.py:84:    def _ollama_request(self, method: str, path: str, **kwargs: Any) -> Any:
+backend/app/core/llm_client.py:106:    def _ollama_base_candidates(self) -> list[str]:
+backend/app/core/llm_client.py:132:    def _normalize_base_url(base_url: str) -> str:
+backend/app/core/llm_client.py:140:    def _list_http_models(self) -> list[str]:
+backend/app/core/llm_client.py:160:    def _http_model_urls(self) -> list[str]:
+backend/app/core/llm_client.py:177:    def _to_models_endpoint(url: str) -> str:
+backend/app/core/llm_client.py:188:    def _headers(self) -> dict[str, str]:
+backend/app/core/llm_client.py:194:    def _merged_system_prompt(self, call_system_prompt: str) -> str:
+backend/app/core/llm_client.py:204:    def _extract_text(body: Any) -> str:
+backend/app/core/llm_client.py:227:    def _extract_model_names(body: Any) -> list[str]:
+backend/app/core/llm_client.py:230:        def collect(item: Any) -> None:
+backend/app/core/web_navigation_agent.py:24:def web_navigator_runtime_status(*, force_refresh: bool = False) -> tuple[bool, str | None]:
+backend/app/core/web_navigation_agent.py:61:class NavigationAction(TypedDict, total=False):
+backend/app/core/web_navigation_agent.py:70:class NavigationState(TypedDict, total=False):
+backend/app/core/web_navigation_agent.py:87:class _BrowserSession:
+backend/app/core/web_navigation_agent.py:88:    def __init__(self, *, headless: bool, timeout_ms: int, capture_html_chars: int) -> None:
+backend/app/core/web_navigation_agent.py:97:    def start(self) -> None:
+backend/app/core/web_navigation_agent.py:112:    def close(self) -> None:
+backend/app/core/web_navigation_agent.py:123:    def navigate_to(self, url: str) -> str:
+backend/app/core/web_navigation_agent.py:129:    def fill_form(self, selector: str, text: str) -> None:
+backend/app/core/web_navigation_agent.py:134:    def click_element(self, selector: str) -> None:
+backend/app/core/web_navigation_agent.py:139:    def current_url(self) -> str:
+backend/app/core/web_navigation_agent.py:144:    def simplified_dom(self) -> str:
+backend/app/core/web_navigation_agent.py:154:class WebNavigationRunner:
+backend/app/core/web_navigation_agent.py:155:    def __init__(
+backend/app/core/web_navigation_agent.py:189:    def run(self, *, task: str, config: dict[str, Any]) -> dict[str, Any]:
+backend/app/core/web_navigation_agent.py:260:    def _bootstrap_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:273:    def _read_page_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:282:    def _plan_action_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:317:    def _execute_action_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:368:    def _route_after_plan(state: NavigationState) -> str:
+backend/app/core/web_navigation_agent.py:377:    def _route_after_execute(state: NavigationState) -> str:
+backend/app/core/web_navigation_agent.py:382:    def _finalize_node(self, state: NavigationState) -> NavigationState:
+backend/app/core/web_navigation_agent.py:412:    def _parse_action(raw_text: str) -> NavigationAction:
+backend/app/core/web_navigation_agent.py:440:    def _parse_json(raw_text: str) -> Any:
+backend/app/core/web_navigation_agent.py:459:    def _extract_first_url(text: str) -> str:
+backend/app/core/web_navigation_agent.py:471:    def _normalize_http_url(raw: str) -> str:
+backend/app/core/web_navigation_agent.py:489:    def _is_placeholder_start_url(raw: str) -> bool:
+backend/app/core/web_navigation_agent.py:499:    def _normalize_domains(raw: Any) -> list[str]:
+backend/app/core/web_navigation_agent.py:509:    def _to_bool(value: Any, default: bool) -> bool:
+backend/app/core/web_navigation_agent.py:524:    def _to_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+backend/app/core/database_routing.py:6:def _required_engines_for_agent(agent_type: str) -> set[str]:
+backend/app/core/database_routing.py:14:def _engine_label(engines: set[str]) -> str:
+backend/app/core/database_routing.py:22:def resolve_database_for_agent(
+backend/app/core/db_connectors.py:16:def _validate_read_only_sql(sql: str) -> str:
+backend/app/core/db_connectors.py:27:def _apply_limit(sql: str, limit: int) -> str:
+backend/app/core/db_connectors.py:33:class BaseConnector:
+backend/app/core/db_connectors.py:34:    def __init__(self, profile: DatabaseProfile) -> None:
+backend/app/core/db_connectors.py:37:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:40:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:43:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:46:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:50:class ClickHouseConnector(BaseConnector):
+backend/app/core/db_connectors.py:51:    def _client(self):
+backend/app/core/db_connectors.py:72:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:82:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:108:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:115:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:142:class OracleConnector(BaseConnector):
+backend/app/core/db_connectors.py:143:    def _connection(self):
+backend/app/core/db_connectors.py:165:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:177:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:204:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:216:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:222:class ElasticsearchConnector(BaseConnector):
+backend/app/core/db_connectors.py:223:    def _base_url(self) -> str:
+backend/app/core/db_connectors.py:235:    def _request_kwargs(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:263:    def test_connection(self) -> dict[str, Any]:
+backend/app/core/db_connectors.py:276:    def schema_snapshot(self, allowed_tables: list[str] | None = None) -> str:
+backend/app/core/db_connectors.py:282:    def run_query(self, sql: str, limit: int) -> list[dict[str, Any]]:
+backend/app/core/db_connectors.py:288:    def run_statement(self, sql: str, limit: int = 200) -> dict[str, Any]:
+backend/app/core/db_connectors.py:294:def connector_for(profile: DatabaseProfile) -> BaseConnector:
+backend/app/core/models.py:41:class LLMConfig(BaseModel):
+backend/app/core/models.py:53:class WebhookConfig(BaseModel):
+backend/app/core/models.py:64:class DatabaseProfileBase(BaseModel):
+backend/app/core/models.py:77:class DatabaseProfile(DatabaseProfileBase):
+backend/app/core/models.py:81:class DatabaseProfileCreate(DatabaseProfileBase):
+backend/app/core/models.py:85:class DatabaseProfileUpdate(DatabaseProfileBase):
+backend/app/core/models.py:89:class DatabaseConfigExport(BaseModel):
+backend/app/core/models.py:97:class DatabaseConfigImportRequest(BaseModel):
+backend/app/core/models.py:102:class DatabaseConfigImportResponse(BaseModel):
+backend/app/core/models.py:111:class AgentConfigBase(BaseModel):
+backend/app/core/models.py:124:class AgentConfig(AgentConfigBase):
+backend/app/core/models.py:128:class AgentConfigCreate(AgentConfigBase):
+backend/app/core/models.py:132:class AgentConfigUpdate(AgentConfigBase):
+backend/app/core/models.py:136:class AgentAuditEntry(BaseModel):
+backend/app/core/models.py:143:class AgentCatalog(BaseModel):
+backend/app/core/models.py:148:class AgentConfigExport(BaseModel):
+backend/app/core/models.py:156:class AgentConfigImportRequest(BaseModel):
+backend/app/core/models.py:162:class AgentConfigImportResponse(BaseModel):
+backend/app/core/models.py:171:class ManagerConfig(BaseModel):
+backend/app/core/models.py:176:class AutomationRuleBase(BaseModel):
+backend/app/core/models.py:194:class AutomationRule(AutomationRuleBase):
+backend/app/core/models.py:198:class AutomationRuleCreate(AutomationRuleBase):
+backend/app/core/models.py:202:class AutomationRuleUpdate(AutomationRuleBase):
+backend/app/core/models.py:206:class AutomationRunStep(BaseModel):
+backend/app/core/models.py:216:class AutomationRunLog(BaseModel):
+backend/app/core/models.py:231:class AppSettings(BaseModel):
+backend/app/core/models.py:240:class ConversationTurn(BaseModel):
+backend/app/core/models.py:245:class AgentRunRequest(BaseModel):
+backend/app/core/models.py:251:class AgentRunResponse(BaseModel):
+backend/app/core/models.py:260:class ManagerRunRequest(BaseModel):
+backend/app/core/models.py:269:class ManagerRunResponse(BaseModel):
+backend/app/core/models.py:287:class AgentTemplate(BaseModel):
+backend/app/core/models.py:294:def agent_requires_database(agent_type: AgentType) -> bool:
+backend/app/core/automation_engine.py:24:class AutomationEngine:
+backend/app/core/automation_engine.py:25:    def __init__(
+backend/app/core/automation_engine.py:42:    def start(self) -> None:
+backend/app/core/automation_engine.py:49:    def stop(self) -> None:
+backend/app/core/automation_engine.py:54:    def reset_rule_state(self, rule_id: str) -> None:
+backend/app/core/automation_engine.py:60:    def list_runs(self, automation_id: str | None = None, limit: int = 50) -> list[AutomationRunLog]:
+backend/app/core/automation_engine.py:68:    def _loop(self) -> None:
+backend/app/core/automation_engine.py:102:    def _scan_rule(self, rule: AutomationRule, settings: AppSettings, catalog: AgentCatalog, now: float) -> None:
+backend/app/core/automation_engine.py:125:    def _snapshot_files(self, rule: AutomationRule) -> dict[str, int]:
+backend/app/core/automation_engine.py:148:    def _normalize_extensions(values: list[str]) -> set[str]:
+backend/app/core/automation_engine.py:162:    def _run_rule_for_file(
+backend/app/core/automation_engine.py:254:    def _record_rule_error_once(self, rule: AutomationRule, error: str, now: float) -> None:
+backend/app/core/automation_engine.py:279:    def _render_prompt(template: str, *, file_path: str, event_type: str) -> str:
+backend/app/core/automation_engine.py:296:    def _now_iso() -> str:
+backend/app/core/models.py:41:class LLMConfig(BaseModel):
+backend/app/core/models.py:53:class WebhookConfig(BaseModel):
+backend/app/core/models.py:64:class DatabaseProfileBase(BaseModel):
+backend/app/core/models.py:77:class DatabaseProfile(DatabaseProfileBase):
+backend/app/core/models.py:81:class DatabaseProfileCreate(DatabaseProfileBase):
+backend/app/core/models.py:85:class DatabaseProfileUpdate(DatabaseProfileBase):
+backend/app/core/models.py:89:class DatabaseConfigExport(BaseModel):
+backend/app/core/models.py:97:class DatabaseConfigImportRequest(BaseModel):
+backend/app/core/models.py:102:class DatabaseConfigImportResponse(BaseModel):
+backend/app/core/models.py:111:class AgentConfigBase(BaseModel):
+backend/app/core/models.py:124:class AgentConfig(AgentConfigBase):
+backend/app/core/models.py:128:class AgentConfigCreate(AgentConfigBase):
+backend/app/core/models.py:132:class AgentConfigUpdate(AgentConfigBase):
+backend/app/core/models.py:136:class AgentAuditEntry(BaseModel):
+backend/app/core/models.py:143:class AgentCatalog(BaseModel):
+backend/app/core/models.py:148:class AgentConfigExport(BaseModel):
+backend/app/core/models.py:156:class AgentConfigImportRequest(BaseModel):
+backend/app/core/models.py:162:class AgentConfigImportResponse(BaseModel):
+backend/app/core/models.py:171:class ManagerConfig(BaseModel):
+backend/app/core/models.py:176:class AutomationRuleBase(BaseModel):
+backend/app/core/models.py:194:class AutomationRule(AutomationRuleBase):
+backend/app/core/models.py:198:class AutomationRuleCreate(AutomationRuleBase):
+backend/app/core/models.py:202:class AutomationRuleUpdate(AutomationRuleBase):
+backend/app/core/models.py:206:class AutomationRunStep(BaseModel):
+backend/app/core/models.py:216:class AutomationRunLog(BaseModel):
+backend/app/core/models.py:231:class AppSettings(BaseModel):
+backend/app/core/models.py:240:class ConversationTurn(BaseModel):
+backend/app/core/models.py:245:class AgentRunRequest(BaseModel):
+backend/app/core/models.py:251:class AgentRunResponse(BaseModel):
+backend/app/core/models.py:260:class ManagerRunRequest(BaseModel):
+backend/app/core/models.py:269:class ManagerRunResponse(BaseModel):
+backend/app/core/models.py:287:class AgentTemplate(BaseModel):
+backend/app/core/models.py:294:def agent_requires_database(agent_type: AgentType) -> bool:
+backend/app/core/agent_templates.py:458:def list_agent_templates() -> list[AgentTemplate]:
+backend/app/core/agent_templates.py:473:def template_defaults(template_id: str) -> AgentConfigCreate:
+
+====================================================================
+APPENDIX E - FRONTEND FUNCTION/TYPE EXPORT INVENTORY (SOURCE-EXTRACTED)
+====================================================================
+frontend/src/components/AgentsTab.tsx:22:interface AgentsTabProps {
+frontend/src/components/AgentsTab.tsx:29:type AgentDraft = Omit<AgentConfig, "id">;
+frontend/src/components/AgentsTab.tsx:30:type CreateFlowStep = "select_type" | "configure";
+frontend/src/components/AgentsTab.tsx:57:function cloneDraft(draft: AgentDraft): AgentDraft {
+frontend/src/components/AgentsTab.tsx:61:function parseJsonObject(value: string, fieldName: string): Record<string, unknown> {
+frontend/src/components/AgentsTab.tsx:79:function tryParseJsonObject(value: string): Record<string, unknown> | null {
+frontend/src/components/AgentsTab.tsx:95:function parseCsvList(value: string): string[] {
+frontend/src/components/AgentsTab.tsx:102:function parseExtensionList(value: string): string[] {
+frontend/src/components/AgentsTab.tsx:111:type SqlParameterType = "string" | "integer" | "number" | "boolean" | "date";
+frontend/src/components/AgentsTab.tsx:113:interface SqlUseCaseParameterDraft {
+frontend/src/components/AgentsTab.tsx:131:function normalizeSqlParameterName(value: string): string {
+frontend/src/components/AgentsTab.tsx:147:function sqlUseCaseParametersFromConfig(value: unknown): SqlUseCaseParameterDraft[] {
+frontend/src/components/AgentsTab.tsx:174:function sqlUseCaseParametersToConfig(
+frontend/src/components/AgentsTab.tsx:190:function defaultedTemplateDraft(template: AgentTemplate): AgentDraft {
+frontend/src/components/AgentsTab.tsx:303:function labelWithInfo(text: string, info: string) {
+frontend/src/components/AgentsTab.tsx:314:function normalizeImportPayload(
+frontend/src/components/AgentsTab.tsx:353:export function AgentsTab({ agents, managerConfig, onRefresh, onNotify }: AgentsTabProps) {
+frontend/src/components/PlaygroundTab.tsx:14:interface PlaygroundTabProps {
+frontend/src/components/PlaygroundTab.tsx:21:type PlaygroundMode = "single" | "manager";
+frontend/src/components/PlaygroundTab.tsx:22:type WorkflowTone = "manager" | "agent" | "success" | "warning" | "error";
+frontend/src/components/PlaygroundTab.tsx:24:interface WorkflowCard {
+frontend/src/components/PlaygroundTab.tsx:32:interface ParsedManagerSummary {
+frontend/src/components/PlaygroundTab.tsx:38:interface TimelineEntry {
+frontend/src/components/PlaygroundTab.tsx:43:function normalizeBulletLine(value: string): string {
+frontend/src/components/PlaygroundTab.tsx:47:function parseManagerSummary(raw: string): ParsedManagerSummary {
+frontend/src/components/PlaygroundTab.tsx:90:function clampPercent(value: number): number {
+frontend/src/components/PlaygroundTab.tsx:97:function resolveManagerFinalAnswer(final: ManagerFinalEvent | null): string {
+frontend/src/components/PlaygroundTab.tsx:120:export function PlaygroundTab({
+frontend/src/api.ts:50:export function fetchConfig(): Promise<AppConfig> {
+frontend/src/api.ts:54:export function saveLLMConfig(payload: LLMConfig): Promise<LLMConfig> {
+frontend/src/api.ts:61:export function saveManagerConfig(payload: ManagerConfig): Promise<ManagerConfig> {
+frontend/src/api.ts:68:export function saveWebhookConfig(payload: WebhookConfig): Promise<WebhookConfig> {
+frontend/src/api.ts:75:export function testWebhookConfig(payload: WebhookConfig): Promise<{
+frontend/src/api.ts:90:export function testLLMConnection(): Promise<{
+frontend/src/api.ts:102:export function fetchLLMModels(): Promise<{ provider: string; models: string[] }> {
+frontend/src/api.ts:106:export function testInternetAccess(): Promise<InternetAccessTestResponse> {
+frontend/src/api.ts:112:export function createDatabase(
+frontend/src/api.ts:121:export function updateDatabase(
+frontend/src/api.ts:131:export function deleteDatabase(id: string): Promise<void> {
+frontend/src/api.ts:137:export function setActiveDatabase(id: string): Promise<AppConfig> {
+frontend/src/api.ts:143:export function testDatabase(id: string): Promise<{ message: string; status: string }> {
+frontend/src/api.ts:149:export function exportDatabaseConnections(): Promise<DatabaseConfigExportPayload> {
+frontend/src/api.ts:153:export function importDatabaseConnections(
+frontend/src/api.ts:166:export function fetchAgents(): Promise<AgentConfig[]> {
+frontend/src/api.ts:170:export function fetchAgentTemplates(): Promise<AgentTemplate[]> {
+frontend/src/api.ts:174:export function createAgent(payload: Omit<AgentConfig, "id">): Promise<AgentConfig> {
+frontend/src/api.ts:181:export function updateAgent(
+frontend/src/api.ts:191:export function deleteAgent(id: string): Promise<void> {
+frontend/src/api.ts:197:export function fetchAgentAudit(id: string): Promise<AgentAuditEntry[]> {
+frontend/src/api.ts:201:export function exportAgentsConfig(): Promise<AgentConfigExportPayload> {
+frontend/src/api.ts:205:export function importAgentsConfig(
+frontend/src/api.ts:219:export function restoreAgentAuditVersion(
+frontend/src/api.ts:228:export function fetchAutomations(): Promise<AutomationRule[]> {
+frontend/src/api.ts:232:export function createAutomation(
+frontend/src/api.ts:241:export function updateAutomation(
+frontend/src/api.ts:251:export function deleteAutomation(id: string): Promise<void> {
+frontend/src/api.ts:257:export function fetchAutomationRuns(
+frontend/src/api.ts:266:export function runAgent(
+frontend/src/api.ts:280:export async function runManagerStream(
+frontend/src/types.ts:1:export type LLMProvider = "ollama" | "http";
+frontend/src/types.ts:2:export type DatabaseEngine = "clickhouse" | "oracle" | "elasticsearch";
+frontend/src/types.ts:3:export type AgentType =
+frontend/src/types.ts:21:export interface LLMConfig {
+frontend/src/types.ts:33:export interface InternetAccessCheck {
+frontend/src/types.ts:42:export interface InternetAccessTestResponse {
+frontend/src/types.ts:51:export interface ManagerConfig {
+frontend/src/types.ts:56:export interface WebhookConfig {
+frontend/src/types.ts:67:export interface DatabaseProfile {
+frontend/src/types.ts:81:export interface DatabaseConfigExportPayload {
+frontend/src/types.ts:89:export interface DatabaseConfigImportResponse {
+frontend/src/types.ts:98:export interface AgentConfig {
+frontend/src/types.ts:112:export interface AgentTemplate {
+frontend/src/types.ts:119:export interface AgentAuditEntry {
+frontend/src/types.ts:126:export interface AgentConfigExportPayload {
+frontend/src/types.ts:134:export interface AgentConfigImportResponse {
+frontend/src/types.ts:143:export interface AppConfig {
+frontend/src/types.ts:152:export interface AgentRunResponse {
+frontend/src/types.ts:161:export interface ConversationTurn {
+frontend/src/types.ts:166:export type ManagerEventType =
+frontend/src/types.ts:176:export interface ManagerEvent {
+frontend/src/types.ts:182:export interface ManagerFinalEvent extends ManagerEvent {
+frontend/src/types.ts:200:export interface AutomationRule {
+frontend/src/types.ts:214:export interface AutomationRunStep {
+frontend/src/types.ts:224:export interface AutomationRunLog {
+frontend/src/App.tsx:9:type Tab = "configuration" | "agents" | "playground";
+frontend/src/App.tsx:11:interface NoticeState {
+frontend/src/components/ConfigurationTab.tsx:36:interface ConfigurationTabProps {
+frontend/src/components/ConfigurationTab.tsx:43:interface DatabaseDraft {
+frontend/src/components/ConfigurationTab.tsx:56:interface AutomationDraft {
+frontend/src/components/ConfigurationTab.tsx:100:function defaultPortForEngine(engine: DatabaseDraft["engine"]): number {
+frontend/src/components/ConfigurationTab.tsx:110:function toEditableDatabase(profile: DatabaseProfile): DatabaseDraft {
+frontend/src/components/ConfigurationTab.tsx:125:function toEditableAutomation(rule: AutomationRule): AutomationDraft {
+frontend/src/components/ConfigurationTab.tsx:140:function parseJsonObject(value: string, fieldName: string): Record<string, unknown> {
+frontend/src/components/ConfigurationTab.tsx:157:function parseHeaderObject(value: string): Record<string, string> {
+frontend/src/components/ConfigurationTab.tsx:166:function parseExtensions(value: string): string[] {
+frontend/src/components/ConfigurationTab.tsx:182:function normalizeDatabaseImportPayload(raw: unknown): DatabaseConfigExportPayload | null {
+frontend/src/components/ConfigurationTab.tsx:218:export function ConfigurationTab({
+
+====================================================================
+APPENDIX F - DETAILED FUNCTION BEHAVIOR NOTES (STEP-BY-STEP)
+====================================================================
+This appendix complements the raw inventory by adding practical behavior notes.
+The intent is operational clarity: what each important function does, in what
+order, with what constraints.
+
+F.1 backend/app/main.py
+- _default_settings:
+  returns default AppSettings object used when settings file is missing.
+- _default_agents:
+  seeds the repository with one SQL analyst default agent.
+- startup:
+  loads settings/agents repositories and starts AutomationEngine thread.
+- shutdown:
+  stops AutomationEngine.
+- health:
+  backend liveness probe.
+
+F.2 backend/app/api/deps.py
+- get_settings_repo/get_agents_repo/get_automation_engine:
+  FastAPI dependency providers returning app state singletons.
+
+F.3 backend/app/api/routers/config.py
+- get_config/get_llm_config/get_manager_config/get_webhook_config:
+  retrieve current persisted settings sections.
+- update_llm_config/update_manager_config/update_webhook_config:
+  mutate corresponding section and persist via repository save.
+- test_webhook_delivery:
+  validates configured webhook by sending synthetic event.
+- test_llm_connection:
+  validates provider reachability and model listing logic.
+- list_llm_models:
+  returns selectable model names for UI dropdowns.
+- test_network_access:
+  backend outbound connectivity diagnostics (DNS + HTTP probes).
+
+F.4 backend/app/api/routers/databases.py
+- _find_database:
+  strict lookup helper, raises 404 when missing.
+- _validate_unique_database_ids:
+  import payload integrity check.
+- create_database:
+  allocates UUID id and optionally sets first profile as active.
+- update_database:
+  full replacement update by id.
+- delete_database:
+  removes profile and reconciles active_database_id fallback.
+- set_active_database:
+  validates target exists and updates active pointer.
+- test_database_connection:
+  calls connector_for(profile).test_connection().
+- export_databases_config:
+  emits versioned payload with active ID and all profiles.
+- import_databases_config:
+  replace or merge mode with deterministic result counts.
+
+F.5 backend/app/api/routers/automations.py
+- _find_automation:
+  strict lookup helper.
+- create/update/delete automation:
+  persist rule changes and reset engine per-rule runtime cache.
+- list_automation_runs:
+  validates rule existence then returns bounded in-memory logs.
+
+F.6 backend/app/api/routers/agents.py
+Shared utility functions:
+- _find_agent/_find_agent_index:
+  strict lookup helpers.
+- _append_agent_audit:
+  prepend new snapshot and enforce max 5 stored versions.
+- _normalized_conversation_history:
+  latest-turn and per-turn character bounding.
+- _contextual_question:
+  prepends memory transcript to current question with instruction text.
+- Excel export helpers:
+  _safe_json_text, _excel_cell_value, _call_event_key,
+  _export_manager_intermediate_results_to_excel.
+
+Endpoint execution functions:
+- list_agents/get_agent_templates:
+  read-only listing endpoints.
+- export_agents_config/import_agents_config:
+  config transfer with replace/merge and optional audit preservation.
+- create_agent/update_agent/delete_agent:
+  CRUD with update audit tracking.
+- list_agent_audit/restore_agent_version:
+  version timeline and rollback mechanics.
+- run_agent:
+  resolves database + memory, executes AgentExecutor, wraps response.
+- run_with_manager:
+  sync manager run, optional Excel export, optional webhook fan-out.
+- run_with_manager_stream:
+  NDJSON streaming with fallback manager_final on unexpected errors.
+
+F.7 backend/app/core/storage.py
+- JSONRepository.load:
+  initialize-if-missing, parse and validate model.
+- JSONRepository.save:
+  thread-safe save path.
+- JSONRepository._write:
+  atomic replacement write via temporary file.
+
+F.8 backend/app/core/llm_client.py
+- generate:
+  central generation API; merges global and call-level system prompts.
+- test_connection/list_models:
+  health and discovery wrappers.
+- _generate_ollama/_generate_http:
+  provider-specific generation implementations.
+- _ollama_request/_ollama_base_candidates:
+  resilient multi-host candidate resolution.
+- _list_http_models/_http_model_urls/_to_models_endpoint:
+  model discovery heuristics for generic HTTP providers.
+- _extract_text/_extract_model_names:
+  response schema normalization utilities.
+
+F.9 backend/app/core/webhook_dispatcher.py
+- send_manager_event:
+  wraps event with envelope and posts to configured webhook.
+- send_test_event:
+  emits webhook_test payload.
+- _build_headers:
+  merges explicit headers + auth token.
+- _post_json:
+  network request, latency capture, robust status payload.
+
+F.10 backend/app/core/database_routing.py
+- _required_engines_for_agent:
+  maps agent types to required DB engines.
+- resolve_database_for_agent:
+  full resolution algorithm with explicit user-facing errors when route fails.
+
+F.11 backend/app/core/langgraph_agent.py
+- _extract_sql:
+  removes markdown fences and trailing semicolon.
+- _schema_node/_sql_node/_query_node/_answer_node:
+  SQL graph execution nodes.
+- LangGraphAgentRunner.run:
+  invokes compiled graph and returns stable output dict.
+
+F.12 backend/app/core/db_connectors.py
+- _validate_read_only_sql:
+  SQL analyst read-only gate.
+- _apply_limit:
+  appends LIMIT when absent.
+- ClickHouseConnector methods:
+  connection, schema introspection, read queries, statement execution.
+- OracleConnector methods:
+  connection, schema introspection, bounded read queries.
+- ElasticsearchConnector methods:
+  connectivity tests and explicit SQL/statement unsupported errors.
+- connector_for:
+  engine-to-connector factory.
+
+F.13 backend/app/core/automation_engine.py
+- start/stop/reset_rule_state/list_runs:
+  engine lifecycle and observability APIs.
+- _loop:
+  periodic scanner orchestrator.
+- _scan_rule:
+  file snapshot delta logic.
+- _snapshot_files:
+  extension filtering and file metadata capture.
+- _run_rule_for_file:
+  sequential chain execution using AgentExecutor.
+- _record_rule_error_once:
+  throttled rule-level failure logging.
+- _render_prompt:
+  template formatter with robust fallback when format errors occur.
+
+F.14 backend/app/core/web_navigation_agent.py
+- web_navigator_runtime_status:
+  caches runtime readiness check for Playwright.
+- _BrowserSession.start/close/navigate_to/fill_form/click_element:
+  browser lifecycle and primitive actions.
+- WebNavigationRunner.run:
+  validates config, executes graph, returns answer/rows/details.
+- _bootstrap_node/read/plan/execute/finalize:
+  state transitions from initial navigation to final reporting.
+- _parse_action/_parse_json:
+  planner output safety normalization.
+- URL/domain normalization helpers:
+  _extract_first_url, _normalize_http_url, _normalize_domains, etc.
+
+F.15 backend/app/core/multi_agent_manager.py
+Core orchestration methods:
+- run_stream:
+  full manager state machine and event emission loop.
+- _decide:
+  one-step LLM manager decision request.
+- _manager_prompt:
+  constructs strict JSON decision prompt with limits/history/runtime hints.
+- _parse_decision:
+  resilient JSON extraction + schema validation.
+
+Planning and dedup methods:
+- _call_signature, _dedupe_proposed_calls.
+- _is_redundant_call:
+  prevents repeated successful equivalent calls.
+
+Data-analysis adaptation methods:
+- _adapt_decision_for_data_analysis.
+- _sql_plannable_agents/_next_sql_bootstrap_call.
+- _data_analysis_state/_data_analysis_memory_text.
+- _can_finalize_data_analysis.
+- _extract_sql_tables/_is_cross_table_sql/_extract_where_preview.
+
+Completion gate and fallback methods:
+- _maybe_finalize_after_success.
+- _normalize_final_answer/_fallback_answer.
+- _default_answer_for_status.
+
+Summary and judge methods:
+- _build_manager_summary/_summary_snapshot/_fallback_manager_summary.
+- _run_sanity_judge/_parse_judge_report/_fallback_judge_report.
+
+Runtime availability methods:
+- _initialize_runtime_unavailable_agents.
+- _agent_runtime_hint.
+- _should_mark_unavailable.
+
+Event methods:
+- _event helper.
+- _final_event builder (answer + summary + judge + counts).
+
+F.16 backend/app/core/agent_executor.py (method map)
+Dispatcher and serialization:
+- execute
+- _json_default
+- _json_dumps
+
+SQL and table-management methods:
+- _run_sql_analyst
+- _run_sql_parameterized_use_case
+- _normalize_sql_use_case_parameters
+- _extract_sql_template_placeholders
+- _extract_sql_use_case_values
+- _render_sql_use_case_template
+- _coerce_sql_parameter_value
+- _sql_parameter_literal
+- _run_clickhouse_table_manager
+- _plan_clickhouse_table_operations
+- _extract_sql_operations
+- _validate_clickhouse_operations
+- _validate_clickhouse_statement_policy
+- _split_sql_statements
+
+Unstructured and cleanup methods:
+- _run_unstructured_extractor
+- _run_email_cleaner
+
+File and document methods:
+- _run_file_assistant
+- _run_text_file_manager
+- _run_excel_manager
+- _run_word_manager
+- _retrieve_file_context
+- _parse_text_file_action/_parse_excel_action/_parse_word_action
+- _repair_excel_action_if_needed
+- _resolve_excel_rows_for_append/_resolve_excel_cells_for_update
+- _resolve_word_content/_generate_word_content_from_request
+
+Internet and retrieval methods:
+- _run_elasticsearch_retriever
+- _run_rag_context
+- _run_internet_search
+- _run_rss_news
+- _fetch_rss_feed_items/_parse_rss_feed/_parse_atom_feed
+- _run_web_scraper
+- _run_web_navigator
+- _run_wikipedia_retriever
+- _duckduckgo_web_results/_duckduckgo_instant_results
+- _wikipedia_results/_wikipedia_opensearch_results
+- _web_scrape_results
+
+Normalization/safety helpers:
+- path safety: _resolve_managed_root, _resolve_safe_path
+- URL helpers: _normalize_http_url, _domains_from_urls, _is_url_allowed, etc.
+- HTML/XML helpers: _clean_html, _extract_html_title, _extract_html_links,
+  _xml_local_name, _xml_child_text, _parse_datetime_value, etc.
+- parsing helpers: _parse_json_output, _tokenize, _score_text, _chunk_text.
+
+F.17 frontend/src/api.ts
+- request:
+  typed HTTP wrapper with standardized error handling.
+- fetch/save/test functions:
+  one function per backend endpoint family.
+- runManagerStream:
+  NDJSON event reader, incremental callback, final event assertion.
+
+F.18 frontend/src/components/ConfigurationTab.tsx
+Primary behavior methods:
+- payload builders: buildLlmPayload, buildWebhookPayload
+- command methods: saveLlm, refreshLlm, runInternetTest,
+  saveManager, saveWebhook, runWebhookTest
+- database methods: saveDatabase, removeDatabase, runDatabaseTest,
+  activateDatabase, startNewDatabase, export/import database config
+- automation methods: startNewAutomation, add/remove/reorder chain,
+  saveAutomation, removeAutomation, loadAutomationRuns
+
+F.19 frontend/src/components/AgentsTab.tsx
+Primary behavior methods:
+- template and draft handling:
+  defaultedTemplateDraft, applyTemplate, chooseTemplateForCreate, startCreate
+- template config parsing/updating:
+  parseJsonObject, tryParseJsonObject, updateTemplateConfigField
+- SQL parameterized-use-case editors:
+  sqlUseCaseParametersFromConfig, ...ToConfig,
+  add/remove/updateSqlUseCaseParameter
+- persistence actions:
+  save, remove, saveManager, exportConfig, importConfig, restoreVersion
+
+F.20 frontend/src/components/PlaygroundTab.tsx
+Primary behavior methods:
+- parsing helpers:
+  parseManagerSummary, resolveManagerFinalAnswer, clampPercent
+- execution methods:
+  executeSingle, executeManager, execute
+- timeline/workflow transforms:
+  workflowCards, timelineEntries, reasoningTrail, methodTrail memoized builders
+
+F.21 vscode_simple_runner/run_vscode_agent_app.py
+- load_runtime_config:
+  loads config_page.py and validates typed models.
+- run_single_agent:
+  executes one agent with DB resolution and prints structured result.
+- run_manager:
+  executes manager stream and prints event timeline + final sections.
+- main:
+  interactive menu loop with in-memory conversation continuity.
+
+F.22 vscode_simple_runner/streamlit_app.py
+- _load_runtime_state/_save_runtime_state:
+  persisted runtime editing snapshot.
+- _validate_runtime_state:
+  strong model validation before execution.
+- render_configuration_tab/render_agents_tab/render_playground_tab:
+  Streamlit-based GUI wrappers around same backend engine.
+- _run_single_agent and manager run logic:
+  mirrors web frontend behavior for local exploratory workflows.
+
+====================================================================
+APPENDIX G - CONSTRAINT MATRIX (TECHNICAL AND OPERATIONAL)
+====================================================================
+G.1 API contract constraints
+- ManagerRunRequest max_steps: [1..30]
+- ManagerRunRequest max_agent_calls: [1..100]
+- ConversationTurn content length: [1..6000]
+- LLM timeout_seconds: [1..300]
+- LLM temperature: [0.0..2.0]
+- Webhook timeout_seconds: [1..60]
+
+G.2 Storage and safety constraints
+- JSONRepository writes are atomic (tmp+replace).
+- Agent audit snapshots retained: max 5 versions per agent.
+- Automation logs retained in memory: max 400 runs.
+- Manager final webhook timeline cap: 400 events.
+
+G.3 Execution constraints
+- SQL analyst: SELECT-only enforcement.
+- ClickHouse manager: policy-based DDL/DML control.
+- Web navigator: requires Playwright runtime.
+- Excel export: requires openpyxl dependency.
+- Word manager: requires python-docx dependency.
+
+G.4 UI constraints and defaults
+- Conversation memory capped at 12 turns in Playground.
+- Manager stream must end with manager_final event.
+- External webhook replacement blocks local Playground execution by design.
+
+G.5 Operational constraints
+- FRONTEND_ORIGIN must match frontend host for CORS.
+- OPEN_WEBUI_WEBHOOK_URL required for bridge forwarding.
+- Database routing can fail when agent type and DB engine are incompatible.
+
